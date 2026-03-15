@@ -1,0 +1,59 @@
+# ================= GIT =================
+.git
+.gitignore
+
+# ================= PYTHON =================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ================= VENV =================
+venv/
+ENV/
+env/
+.venv/
+
+# ================= IDE =================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ================= SECRETS =================
+.env
+*.pem
+*.key
+*.secret
+credentials.json
+
+# ================= DATABASE =================
+*.db
+*.sqlite
+*.sqlite3
+bot_database.db
+data/
+
+# ================= LOGS =================
+*.log
+logs/
+
+# ================= DOCKER =================
+Dockerfile
+docker-compose*.yml
+.dockerignore
+
+# ================= OS =================
+.DS_Store
+Thumbs.db
+
+# ================= TEST/DEV =================
+tests/
+test_*.py
+*.tmp
+*.bak
