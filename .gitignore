@@ -37,7 +37,7 @@ env/
 .pydevproject
 *.sublime-project
 *.sublime-workspace
-
+env.rar
 .env
 *.pem
 *.key
