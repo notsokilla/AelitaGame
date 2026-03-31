@@ -15,7 +15,7 @@ COPY requirements.txt .
 
 # Устанавливаем pip (можно без сети)
 RUN pip install --no-cache-dir --upgrade pip
-
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ================= КОПИРОВАНИЕ КОДА =================
 # Копируем весь проект
