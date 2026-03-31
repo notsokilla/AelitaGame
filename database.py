@@ -163,6 +163,32 @@ class Database:
             'conversion_rate': round((clicked / total * 100), 2) if total > 0 else 0
         }
 
+    async def add_user_email(self, user_id: int, email: str):
+        """Добавить или обновить email пользователя"""
+        # Сначала проверяем существует ли колонка email
+        try:
+            await self._connection.execute("""
+                ALTER TABLE users ADD COLUMN email TEXT
+            """)
+            await self._connection.commit()
+        except Exception:
+            # Колонка уже существует — это нормально
+            pass
+
+        # Обновляем email
+        await self._connection.execute("""
+            UPDATE users SET email = ? WHERE user_id = ?
+        """, (email, user_id))
+        await self._connection.commit()
+
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        """Найти пользователя по email"""
+        cursor = await self._connection.execute(
+            "SELECT * FROM users WHERE email = ?", (email,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     # ================= АКТИВНОСТЬ =================
 
     async def log_action(self, user_id: int, action_type: str, action_data: str = ""):

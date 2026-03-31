@@ -1,5 +1,5 @@
 # ================= БАЗОВЫЙ ОБРАЗ =================
-FROM python:3.11-slim-local
+FROM python:3.11-slim
 
 # ================= ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ =================
 # Убираем буферизацию вывода для логов в реальном времени
@@ -13,14 +13,9 @@ WORKDIR /app
 # Копируем только requirements.txt сначала (для кэширования слоёв)
 COPY requirements.txt .
 
-# Копируем локальный кэш зависимостей
-COPY requirements-cache/ /tmp/wheels/
-
 # Устанавливаем pip (можно без сети)
-#RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir --upgrade pip
 
-# Устанавливаем пакеты ИЗ ЛОКАЛЬНОГО КЭША (без интернета!)
-RUN pip install --no-cache-dir --no-index --find-links=/tmp/wheels -r requirements.txt
 
 # ================= КОПИРОВАНИЕ КОДА =================
 # Копируем весь проект

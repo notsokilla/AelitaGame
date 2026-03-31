@@ -11,14 +11,15 @@ import re
 import time
 from datetime import datetime
 from typing import Optional
-from aiogram.client.session.aiohttp import AiohttpSession
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, StateFilter
-from aiogram.types import Message, CallbackQuery, FSInputFile
+from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
+from aiogram.client.session.aiohttp import AiohttpSession
 from openai import AsyncOpenAI
 
 # Наши модули
@@ -177,12 +178,13 @@ async def call_neural_api(prompt_type: str, user_query: str) -> str:
 # ================= КЛАВИАТУРЫ =================
 
 def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
-    """Главное меню (БЕЗ АДМИН-КНОПКИ)"""
+    """Главное меню (БЕЗ КНОПКИ ПРИВЯЗКИ ПОЧТЫ)"""
     keyboard = [
         [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
         [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
         [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
     ]
+    # 🔹 СТАРАЯ КНОПКА ПОМОЩИ (без привязки почты)
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
     return types.ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
 
@@ -240,22 +242,48 @@ async def cmd_start(message: Message, state: FSMContext):
     """/start"""
     user = message.from_user
 
+    # Сохраняем пользователя в БД
     await db.add_or_update_user({
         'id': user.id, 'username': user.username,
         'first_name': user.first_name, 'last_name': user.last_name,
         'language_code': user.language_code, 'is_bot': user.is_bot
     })
 
-    await message.answer(
+    # Проверяем, привязана ли почта
+    user_data = await db.get_user(user.id)
+    email = user_data.get('email') if user_data else None
+
+    # 🔹 ФОРМИРУЕМ СООБЩЕНИЕ
+    text = (
         f"🤖 <b>Привет, {user.first_name}!</b>\n\n"
         f"Я — универсальный AI-помощник:\n"
+        f"🎮 Гайды, билды и стратегии по играм\n"
+        f"🎮 Помощь с фармом валюты в твоей любимой игре\n"
         f"🧮 Математика с объяснением шагов\n"
         f"🔍 Поиск и анализ информации\n"
         f"🎓 Помощь в учёбе и объяснения простыми словами\n"
-        f"🎮 Гайды, билды и стратегии по играм\n"
         f"📰 Новости и тренды с аналитикой\n"
-        f"💬 Ответы на любые вопросы",
-        reply_markup=create_main_keyboard(user.id),
+        f"💬 Ответы на любые вопросы\n\n"
+    )
+
+    # 🔹 ЕСЛИ ПОЧТА НЕ ПРИВЯЗАНА — ПОКАЗЫВАЕМ ИНСТРУКЦИЮ
+    if not email:
+        text += (
+            f"⚠️ <b>ВАЖНО: Для доступа к функциям необходимо привязать почту!</b>\n\n"
+            f"📧 <b>Введите email, который вы указывали при регистрации на сайте.</b>\n"
+            f"Просто отправьте его в чат (например: user@example.com)\n\n"
+            f"После привязки почты вам откроется полный функционал бота."
+        )
+        # Кнопки НЕ показываем
+        keyboard = None
+    else:
+        # ✅ Почта привязана — показываем меню
+        text += f"✅ <b>Ваша почта привязана:</b> <code>{email}</code>"
+        keyboard = create_main_keyboard(user.id)
+
+    await message.answer(
+        text,
+        reply_markup=keyboard,
         parse_mode="HTML"
     )
     await db.log_action(user.id, "start", "Bot started")
@@ -266,15 +294,35 @@ async def handle_subscription_help(message: Message):
     """Кнопка помощи и подписки"""
     user_id = message.from_user.id
 
+    # Проверяем привязку почты
+    user_data = await db.get_user(user_id)
+    email = user_data.get('email') if user_data else None
+
     await db.mark_subscription_clicked(user_id)
     await db.log_action(user_id, "subscription_click", SUBSCRIPTION_URL)
 
-    await message.answer(
+    text = (
         f"📋 <b>Помощь и подписка</b>\n\n"
         f"🔧 <b>Технические вопросы и отмена подписки:</b>\n"
         f"Пишите: @samoylov1smm\n\n"
-        f"🌐 <b>Отмена подписки:</b>\n"
-        f"{SUBSCRIPTION_URL}",
+    )
+
+    if not email:
+        text += (
+            f"⚠️ <b>Почта не привязана!</b>\n\n"
+            f"📧 <b>Введите email, который вы указывали при регистрации на сайте.</b>\n"
+            f"Просто отправьте его в чат (например: user@example.com)\n\n"
+            f"После привязки почты вы получите доступ к личному кабинету."
+        )
+    else:
+        text += (
+            f"✅ <b>Ваша почта:</b> <code>{email}</code>\n\n"
+            f"Отмену подписки можете произвести на сайте самостоятельно в личном кабинете:\n"
+            f"{SUBSCRIPTION_URL}"
+        )
+
+    await message.answer(
+        text,
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="🌐 Перейти на сайт", url=SUBSCRIPTION_URL)]
         ]),
@@ -282,39 +330,178 @@ async def handle_subscription_help(message: Message):
     )
 
 
+# ================= ЕДИНСТВЕННЫЙ @dp.message() ХЕНДЛЕР =================
+
+@dp.message(~F.text.startswith('/'), StateFilter(None))
+async def handle_message(message: Message, state: FSMContext):
+    """
+    Основной обработчик сообщений:
+    1. Проверяет — не email ли это (привязка к ЛК)
+    2. Затем обрабатывает вопросы к ИИ
+
+    НЕ срабатывает если:
+    - Сообщение начинается с / (команды)
+    - Есть активное состояние FSM (админка, математика и т.д.)
+    """
+
+    # 🔹 Пропускаем если нет текста
+    if not message.text:
+        return
+
+    text = message.text.strip()
+    user_id = message.from_user.id
+
+    # 🔍 ПРОВЕРКА: не email ли это?
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+    if re.match(email_pattern, text):
+        # ✅ Это email — обрабатываем привязку к ЛК
+        try:
+            # 💾 Сохраняем email в БД
+            await db.add_user_email(user_id, text)
+
+            # 📤 ОТПРАВЛЯЕМ ОТВЕТ + КЛАВИАТУРУ
+            await message.answer(
+                f"✅ <b>Почта привязана!</b>\n\n"
+                f"📧 Email: <code>{text}</code>\n\n"
+                f"🔗 <b>Ваш личный кабинет:</b>\n"
+                f"Перейдите по ссылке для управления подпиской:\n\n"
+                f"👉 {SUBSCRIPTION_URL}\n\n"
+                f"📋 <b>В личном кабинете вы можете:</b>\n"
+                f"• ✅ Проверить статус подписки\n"
+                f"• ❌ <b>Отменить подписку</b> в любой момент\n"
+                f"• 📊 Получить доступ ко всем материалам\n\n"
+                f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\n"
+                f"Используйте кнопки в меню для выбора категории.",
+                reply_markup=create_main_keyboard(user_id),  # ← ПОКАЗЫВАЕМ КНОПКИ!
+                parse_mode="HTML",
+                disable_web_page_preview=False
+            )
+
+            # 📝 Логируем действие
+            await db.log_action(user_id, "email_linked", text)
+
+        except Exception as e:
+            logging.error(f"Ошибка при привязке email: {e}")
+            await message.answer(
+                "❌ <b>Не удалось привязать почту</b>\n\n"
+                "Попробуйте позже или обратитесь в поддержку: @samoylov1smm",
+                parse_mode="HTML"
+            )
+
+        # 🔹 ЗАВЕРШАЕМ — сообщение обработано как email
+        return
+
+    # ❌ НЕ email — передаём обработку в ИИ (продолжаем выполнение)
+
+    # ================= ОБРАБОТКА ВОПРОСОВ К ИИ =================
+
+    await db.increment_message_count(user_id)
+    await db.log_action(user_id, "message", text[:100])
+
+    # Определяем категорию и получаем ответ
+    category = detect_category(text)
+    await bot.send_chat_action(message.chat.id, "typing")
+
+    ai_response = await call_neural_api(category, text)
+    ai_response = truncate_message(ai_response)
+    await db.increment_ai_requests(user_id)
+
+    # Формируем и отправляем ответ
+    emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
+    full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
+
+    try:
+        await message.answer(
+            full_response,
+            reply_markup=create_inline_categories(),
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "too long" in str(e):
+            await message.answer(
+                f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...",
+                reply_markup=create_inline_categories(),
+                parse_mode="HTML"
+            )
+
+
 # ================= АДМИН: ВХОД ПО ПАРОЛЮ =================
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
-    """Вход в админ-панель"""
-    if check_admin_session(message.from_user.id):
-        await message.answer("⚙️ <b>Админ-панель</b>", reply_markup=create_admin_keyboard(), parse_mode="HTML")
-        return
+     """Вход в админ-панель — ВЕРСИЯ С ОТЛАДКОЙ"""
 
-    await state.set_state(QueryMode.admin_waiting_password)
-    await message.answer("🔐 <b>Введите пароль:</b>\n/cancel", parse_mode="HTML")
+     user_id = message.from_user.id
+     logging.info(f"🔐 /admin вызван пользователем {user_id} (@{message.from_user.username})")
+     logging.info(f"🔐 ADMIN_PASSWORD из конфига: '{ADMIN_PASSWORD}' (длина: {len(ADMIN_PASSWORD) if ADMIN_PASSWORD else 0})")
+
+     try:
+         # 🔹 ПРОВЕРКА: задан ли пароль в конфиге
+         if not ADMIN_PASSWORD:
+             logging.warning(f"⚠️ ADMIN_PASSWORD пустой! Отправляем предупреждение пользователю {user_id}")
+             await message.answer(
+                 "⚠️ <b>Админ-панель не настроена</b>\n\n"
+                 "Пароль не задан в конфигурации.\n"
+                 "Обратитесь к разработчику.",
+                 parse_mode="HTML"
+             )
+             logging.info(f"✅ Предупреждение отправлено пользователю {user_id}")
+             return
+
+         logging.info(f"✅ ADMIN_PASSWORD задан, проверяем сессию для {user_id}")
+
+         # Если сессия уже активна — сразу показываем панель
+         if check_admin_session(user_id):
+             logging.info(f"✅ Сессия активна для {user_id}, показываем панель")
+             await message.answer(
+                 "⚙️ <b>Админ-панель</b>",
+                 reply_markup=create_admin_keyboard(),
+                 parse_mode="HTML"
+             )
+             logging.info(f"✅ Панель отправлена пользователю {user_id}")
+             return
+
+         # Запрашиваем пароль
+         logging.info(f"🔐 Запрашиваем пароль у пользователя {user_id}")
+         await state.set_state(QueryMode.admin_waiting_password)
+         logging.info(f"🔐 Состояние установлено: {await state.get_state()}")
+
+         await message.answer(
+             "🔐 <b>Введите пароль администратора</b>\n\n"
+             "Для отмены: /cancel",
+             parse_mode="HTML"
+         )
+         logging.info(f"✅ Запрос пароля отправлен пользователю {user_id}")
+
+     except Exception as e:
+         logging.error(f"❌ ОШИБКА в cmd_admin для пользователя {user_id}: {type(e).__name__}: {e}", exc_info=True)
+         await message.answer("❌ Произошла ошибка при входе в админ-панель. Попробуйте позже.", parse_mode="HTML")
 
 
 @dp.message(QueryMode.admin_waiting_password)
 async def admin_check_password(message: Message, state: FSMContext):
-    """Проверка пароля"""
+    """Проверка пароля админа"""
     user_id = message.from_user.id
     user_password = message.text.strip()
 
+    # Проверка блокировки
     now = time.time()
     if user_id in failed_login_attempts:
         failed_login_attempts[user_id] = [t for t in failed_login_attempts[user_id] if now - t < LOCKOUT_DURATION]
         if len(failed_login_attempts[user_id]) >= MAX_FAILED_ATTEMPTS:
             await state.clear()
-            await message.answer(f"🔒 Заблокировано на {LOCKOUT_DURATION//60} мин.")
+            await message.answer(f"🔒 Слишком много неудачных попыток.\nПопробуйте через {LOCKOUT_DURATION//60} мин.")
             return
 
     if user_password == ADMIN_PASSWORD and ADMIN_PASSWORD:
+        # Успех
         failed_login_attempts.pop(user_id, None)
         await state.clear()
         activate_admin_session(user_id)
         await db.log_action(user_id, "admin_login", "Success")
 
+        # Уведомление другим админам
         for admin_id in ADMIN_IDS:
             if admin_id != user_id:
                 try:
@@ -325,6 +512,7 @@ async def admin_check_password(message: Message, state: FSMContext):
         await message.answer("✅ <b>Доступ разрешён!</b>\n\n⚙️ <b>Админ-панель</b>",
                            reply_markup=create_admin_keyboard(), parse_mode="HTML")
     else:
+        # Неудача
         if user_id not in failed_login_attempts:
             failed_login_attempts[user_id] = []
         failed_login_attempts[user_id].append(now)
@@ -334,51 +522,56 @@ async def admin_check_password(message: Message, state: FSMContext):
         remaining = MAX_FAILED_ATTEMPTS - len(failed_login_attempts[user_id])
 
         if remaining > 0:
-            await message.answer(f"❌ Неверно! Осталось: {remaining}")
+            await message.answer(f"❌ Неверный пароль!\nОсталось попыток: {remaining}")
         else:
-            await message.answer(f"🔒 Заблокировано на {LOCKOUT_DURATION//60} мин.")
+            await message.answer(f"🔒 Доступ заблокирован на {LOCKOUT_DURATION//60} мин.")
 
 
 @dp.message(Command("admin_logout"))
 async def cmd_admin_logout(message: Message):
-    """Выход из админки"""
+    """Выход из админ-панели"""
     logout_admin(message.from_user.id)
-    await message.answer("🔓 <b>Выход выполнен</b>", parse_mode="HTML",
-                        reply_markup=create_main_keyboard(message.from_user.id))
+    await message.answer("🔓 <b>Вы вышли из админ-панели</b>\nДля входа снова: /admin",
+                        parse_mode="HTML", reply_markup=create_main_keyboard(message.from_user.id))
 
 
 @dp.message(Command("cancel"), StateFilter("*"))
 async def cmd_cancel(message: Message, state: FSMContext):
-    """Отмена"""
+    """Отмена любого режима"""
     await state.clear()
     await message.answer("✅ Отменено", reply_markup=create_main_keyboard(message.from_user.id))
 
 
 @dp.message(Command("myid"))
 async def cmd_myid(message: Message):
-    """Показать ID"""
-    await message.answer(f"ID: <code>{message.from_user.id}</code>\n@{message.from_user.username}", parse_mode="HTML")
+    """Показать свой ID"""
+    await message.answer(f"Ваш ID: <code>{message.from_user.id}</code>\nUsername: @{message.from_user.username}", parse_mode="HTML")
 
 
 # ================= АДМИН: СТАТИСТИКА =================
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_show_stats(callback: CallbackQuery):
-    """Статистика"""
+    """Показать статистику"""
     if not check_admin_session(callback.from_user.id):
-        await callback.answer("🔐 Сессия истекла. /admin", show_alert=True)
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
     stats = await db.get_full_stats()
 
     text = (
-        f"📊 <b>Статистика</b>\n\n"
-        f"👥 Пользователи: {stats['total_users']}\n"
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 <b>Пользователи:</b>\n"
+        f"   • Всего: {stats['total_users']}\n"
         f"   • Активные (24ч): {stats['active_24h']}\n"
         f"   • Активные (7дн): {stats['active_7d']}\n\n"
-        f"💬 Сообщений: {stats['total_messages']}\n"
-        f"🤖 Запросов к ИИ: {stats['total_ai_requests']}\n\n"
-        f"💰 Подписки: {stats['subscription_clicked']} ({stats['conversion_rate']}%)"
+        f"💬 <b>Активность:</b>\n"
+        f"   • Сообщений всего: {stats['total_messages']}\n"
+        f"   • Запросов к ИИ: {stats['total_ai_requests']}\n"
+        f"   • Среднее на пользователя: {stats['avg_messages_per_user']}\n\n"
+        f"💰 <b>Подписки:</b>\n"
+        f"   • Перешли по ссылке: {stats['subscription_clicked']}\n"
+        f"   • Конверсия: {stats['conversion_rate']}%"
     )
 
     await callback.message.edit_text(text, reply_markup=create_admin_keyboard(), parse_mode="HTML")
@@ -389,14 +582,18 @@ async def admin_show_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
-    """Начать рассылку"""
+    """Начать создание рассылки"""
     if not check_admin_session(callback.from_user.id):
-        await callback.answer("🔐 /admin", show_alert=True)
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
     await state.set_state(QueryMode.admin_broadcast_text)
     await callback.message.edit_text(
-        "📢 <b>Рассылка</b>\n\nОтправьте текст:\n/cancel",
+        "📢 <b>Создание рассылки</b>\n\n"
+        "Отправьте текст сообщения для рассылки.\n"
+        "Чтобы добавить фото/видео — отправьте их СРАЗУ после текста.\n"
+        "Для отмены: /cancel",
+        reply_markup=None,
         parse_mode="HTML"
     )
     await callback.answer()
@@ -404,78 +601,85 @@ async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(QueryMode.admin_broadcast_text)
 async def admin_broadcast_receive_text(message: Message, state: FSMContext):
-    """Получение текста"""
+    """Получение текста рассылки"""
     if not check_admin_session(message.from_user.id):
+        await message.answer("🔐 Сессия истекла. Введите /admin")
         return
 
-    await state.update_data(broadcast_text=message.text, admin_id=message.from_user.id)
-    await message.answer("📎 Теперь фото/видео или /send", reply_markup=types.ForceReply())
+    text = message.text
+    await state.update_data(broadcast_text=text, admin_id=message.from_user.id)
+
+    await message.answer("📎 Теперь отправьте медиа (фото/видео) или напишите /send для отправки только текста", reply_markup=types.ForceReply())
     await state.set_state(QueryMode.admin_broadcast_media)
 
 
 @dp.message(QueryMode.admin_broadcast_media, F.photo)
 async def admin_broadcast_receive_photo(message: Message, state: FSMContext):
-    """Фото для рассылки"""
+    """Получение фото для рассылки"""
     if not check_admin_session(message.from_user.id):
         return
 
+    file_id = message.photo[-1].file_id
     data = await state.get_data()
+
     broadcast_id = await db.add_broadcast(
         admin_id=data.get('admin_id'),
         message_text=data.get('broadcast_text'),
         media_type='photo',
-        media_file_id=message.photo[-1].file_id
+        media_file_id=file_id
     )
 
     await state.clear()
-    await message.answer(f"✅ Рассылка ID:{broadcast_id}\nОтправка...")
-    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'photo',
-                        message.photo[-1].file_id, data.get('admin_id'))
+    await message.answer(f"✅ Рассылка создана (ID: {broadcast_id})\nНачинаю отправку...")
+    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'photo', file_id, data.get('admin_id'))
 
 
 @dp.message(QueryMode.admin_broadcast_media, F.video)
 async def admin_broadcast_receive_video(message: Message, state: FSMContext):
-    """Видео"""
+    """Получение видео для рассылки"""
     if not check_admin_session(message.from_user.id):
         return
 
+    file_id = message.video.file_id
     data = await state.get_data()
+
     broadcast_id = await db.add_broadcast(
         admin_id=data.get('admin_id'),
         message_text=data.get('broadcast_text'),
         media_type='video',
-        media_file_id=message.video.file_id
+        media_file_id=file_id
     )
 
     await state.clear()
-    await message.answer(f"✅ Рассылка ID:{broadcast_id}")
-    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'video',
-                        message.video.file_id, data.get('admin_id'))
+    await message.answer(f"✅ Рассылка создана (ID: {broadcast_id})\nНачинаю отправку...")
+    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'video', file_id, data.get('admin_id'))
 
 
 @dp.message(QueryMode.admin_broadcast_media, Command("send"))
 async def admin_broadcast_send_text_only(message: Message, state: FSMContext):
-    """Только текст"""
+    """Отправка рассылки только текстом"""
     if not check_admin_session(message.from_user.id):
         return
 
     data = await state.get_data()
+    text = data.get('broadcast_text')
+
     broadcast_id = await db.add_broadcast(
         admin_id=data.get('admin_id'),
-        message_text=data.get('broadcast_text'),
+        message_text=text,
         media_type=None,
         media_file_id=None
     )
 
     await state.clear()
-    await message.answer(f"✅ Рассылка ID:{broadcast_id}")
-    await send_broadcast(broadcast_id, data.get('broadcast_text'), None, None, data.get('admin_id'))
+    await message.answer(f"✅ Текстовая рассылка создана (ID: {broadcast_id})\nНачинаю отправку...")
+    await send_broadcast(broadcast_id, text, None, None, data.get('admin_id'))
 
 
 async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_file_id: str, admin_id: int = None):
-    """Отправка рассылки с отчётом админу"""
+    """Функция отправки рассылки всем пользователям с отчётом админу"""
 
-    logging.info(f"📢 РАССЫЛКА ID:{broadcast_id} НАЧАТА")
+    logging.info(f"📢 НАЧАЛО РАССЫЛКИ (ID: {broadcast_id})")
 
     users = await db.get_all_users()
     sent = 0
@@ -500,7 +704,7 @@ async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_fi
             sent += 1
 
             if i % 10 == 0:
-                logging.info(f"   Прогресс: {i}/{len(users)}")
+                logging.info(f"   📤 Прогресс: {i}/{len(users)}")
 
             await asyncio.sleep(0.05)
 
@@ -513,7 +717,7 @@ async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_fi
 
     duration = time.time() - start_time
 
-    # ФОРМИРУЕМ ОТЧЁТ
+    # ФОРМИРУЕМ ОТЧЁТ ДЛЯ АДМИНА
     report = (
         f"✅ <b>РАССЫЛКА ЗАВЕРШЕНА</b>\n\n"
         f"📋 ID: {broadcast_id}\n"
@@ -532,14 +736,15 @@ async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_fi
             errors_preview += f"\n... и ещё {len(error_details) - 10}"
         report += f"\n\n⚠️ <b>ОШИБКИ:</b>\n{errors_preview}"
 
-    # Отправляем отчёт админу
+    # Отправляем отчёт админу который запустил рассылку
     if admin_id:
         try:
             await bot.send_message(admin_id, report, parse_mode="HTML")
-            logging.info(f"📨 Отчёт отправлен админу {admin_id}")
+            logging.info(f"📨 Отчёт отправлен админу ID:{admin_id}")
         except Exception as e:
-            logging.error(f"❌ Ошибка отправки отчёта: {e}")
+            logging.error(f"❌ Не удалось отправить отчёт админу {admin_id}: {e}")
 
+    # Также отправляем всем админам из списка ADMIN_IDS
     for aid in ADMIN_IDS:
         if aid != admin_id:
             try:
@@ -557,7 +762,7 @@ async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_fi
 async def admin_show_users(callback: CallbackQuery):
     """Список пользователей (страница 1)"""
     if not check_admin_session(callback.from_user.id):
-        await callback.answer("🔐 /admin", show_alert=True)
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
     await show_users_page(callback.message, 1, callback.from_user.id)
@@ -565,7 +770,7 @@ async def admin_show_users(callback: CallbackQuery):
 
 
 async def show_users_page(message: types.Message, page: int, admin_id: int):
-    """Показывает страницу пользователей"""
+    """Показывает страницу пользователей с EMAIL"""
     users = await db.get_all_users()
     total_users = len(users)
     total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
@@ -583,10 +788,14 @@ async def show_users_page(message: types.Message, page: int, admin_id: int):
 
     for i, user in enumerate(page_users, start_idx + 1):
         username = f"@{user['username']}" if user.get('username') else f"ID:{user['user_id']}"
+        email = user.get('email') or "❌ Не привязана"
         sub_status = "✅" if user.get('subscription_clicked') else "❌"
         msgs = user.get('total_messages', 0)
+
+        # 🔹 ДОБАВЛЯЕМ EMAIL В СПИСОК
         text += f"{i}. {username}\n"
-        text += f"   Сообщений: {msgs} | Подписка: {sub_status}\n\n"
+        text += f"   📧 Email: <code>{email}</code>\n"
+        text += f"   💬 Сообщений: {msgs} | Подписка: {sub_status}\n\n"
 
     text += f"\n📊 Всего: {total_users} пользователей"
 
@@ -601,7 +810,7 @@ async def show_users_page(message: types.Message, page: int, admin_id: int):
 async def handle_users_pagination(callback: CallbackQuery):
     """Пагинация пользователей"""
     if not check_admin_session(callback.from_user.id):
-        await callback.answer("🔐 /admin", show_alert=True)
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
     page = int(callback.data.split("_")[-1])
@@ -613,9 +822,9 @@ async def handle_users_pagination(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_activity")
 async def admin_show_activity(callback: CallbackQuery):
-    """Топ активных"""
+    """Топ активных пользователей"""
     if not check_admin_session(callback.from_user.id):
-        await callback.answer("🔐 /admin", show_alert=True)
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
     top_msgs = await db.get_top_users('messages', limit=10)
@@ -628,7 +837,7 @@ async def admin_show_activity(callback: CallbackQuery):
             r += f"{i}. {name} — {u['value']}\n"
         return r
 
-    text = fmt(top_msgs, "Топ по сообщениям") + "\n" + fmt(top_ai, "Топ по ИИ")
+    text = fmt(top_msgs, "Топ по сообщениям") + "\n" + fmt(top_ai, "Топ по запросам к ИИ")
 
     await callback.message.edit_text(text, reply_markup=create_admin_keyboard(), parse_mode="HTML")
     await callback.answer()
@@ -636,62 +845,28 @@ async def admin_show_activity(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_back")
 async def admin_back(callback: CallbackQuery):
-    """Назад"""
+    """Назад в админ-панель"""
     if not check_admin_session(callback.from_user.id):
-        await callback.answer("🔐 /admin", show_alert=True)
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
-    await callback.message.edit_text("⚙️ <b>Админ-панель</b>",
-                                    reply_markup=create_admin_keyboard(), parse_mode="HTML")
+    await callback.message.edit_text("⚙️ <b>Админ-панель</b>", reply_markup=create_admin_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 
 @dp.callback_query(F.data == "admin_logout")
 async def admin_logout_callback(callback: CallbackQuery):
-    """Выход из админки — отправляем НОВОЕ сообщение вместо редактирования"""
+    """Выход через кнопку"""
     if not check_admin_session(callback.from_user.id):
         await callback.answer()
         return
 
     logout_admin(callback.from_user.id)
-
-    await callback.message.delete()  # Удаляем сообщение с инлайн-кнопками
-    await callback.message.answer(
-        "🔓 <b>Вы вышли из админ-панели</b>",
-        reply_markup=create_main_keyboard(callback.from_user.id),  # ✅ Теперь можно
-        parse_mode="HTML"
-    )
-    await callback.answer("✅ Выйшли")
-
-# ================= ОБРАБОТКА СООБЩЕНИЙ =================
-
-@dp.message()
-async def handle_message(message: Message, state: FSMContext):
-    """Обычные сообщения"""
-    if message.text and message.text.startswith('/'):
-        return
-
-    user_id = message.from_user.id
-    await db.increment_message_count(user_id)
-    await db.log_action(user_id, "message", message.text[:100])
-
-    category = detect_category(message.text)
-    await bot.send_chat_action(message.chat.id, "typing")
-
-    ai_response = await call_neural_api(category, message.text)
-    ai_response = truncate_message(ai_response)
-    await db.increment_ai_requests(user_id)
-
-    emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
-
-    full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
-
-    try:
-        await message.answer(full_response, reply_markup=create_inline_categories(), parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "too long" in str(e):
-            await message.answer(f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...",
-                               reply_markup=create_inline_categories(), parse_mode="HTML")
+    await callback.message.delete()
+    await callback.message.answer("🔓 <b>Вы вышли из админ-панели</b>",
+                                 reply_markup=create_main_keyboard(callback.from_user.id),
+                                 parse_mode="HTML")
+    await callback.answer("✅ Вы вышли")
 
 
 # ================= CALLBACK: КАТЕГОРИИ =================
@@ -719,19 +894,13 @@ async def handle_category_callback(callback: CallbackQuery, state: FSMContext):
 async def errors_handler(update: ErrorEvent, exception: Exception) -> bool:
     """Глобальный обработчик ошибок для aiogram 3.x"""
 
-    # Игнорируем устаревшие callback
     if isinstance(exception, TelegramBadRequest) and "query is too old" in str(exception):
         return True
-
-    # Игнорируем заблокированных пользователей
     if isinstance(exception, TelegramForbiddenError):
         return True
-
-    # Игнорируем слишком длинные сообщения
     if isinstance(exception, TelegramBadRequest) and "too long" in str(exception):
         return True
 
-    # Логируем остальные ошибки
     logging.error(f"Error: {type(exception).__name__}: {exception}")
     return True
 
@@ -745,9 +914,7 @@ async def main():
     await db.connect()
 
     # 🔧 НАСТРОЙКА ПРОКСИ ДЛЯ TELEGRAM API
-    # В aiogram 3.x AiohttpSession автоматически использует переменные окружения
-    # если они заданы (HTTPS_PROXY, HTTP_PROXY, ALL_PROXY)
-    session = AiohttpSession()  # ← ПРОСТО ТАК, БЕЗ АРГУМЕНТОВ!
+    session = AiohttpSession()  # Использует переменные окружения автоматически
 
     # 🔧 Создаём бота с сессией
     global bot
