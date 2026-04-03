@@ -846,13 +846,14 @@ async def admin_show_activity(callback: CallbackQuery):
 
 
 @dp.callback_query(F.data == "admin_back")
-async def admin_back(callback: CallbackQuery):
+async def admin_back(callback: CallbackQuery, state: FSMContext):  # ← ДОБАВЛЕНО: state: FSMContext
     """Назад в админ-панель"""
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
-    await callback.state.clear()
+    # ✅ Очищаем состояние через параметр state
+    await state.clear()
 
     await callback.message.edit_text(
         "⚙️ <b>Админ-панель</b>",
