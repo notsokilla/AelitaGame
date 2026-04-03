@@ -135,6 +135,22 @@ class Database:
         """, (user_id,))
         await self._connection.commit()
 
+    async def get_user_by_email(self, email: str) -> Optional[dict]:
+        """Найти пользователя по email"""
+        cursor = await self._connection.execute(
+            "SELECT * FROM users WHERE email = ?", (email,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def search_users_by_email(self, email_fragment: str) -> List[dict]:
+        """Найти пользователей по части email (LIKE поиск)"""
+        cursor = await self._connection.execute(
+            "SELECT * FROM users WHERE email LIKE ? ORDER BY registered_at DESC LIMIT 50",
+            (f"%{email_fragment}%",)
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
     # ================= ПОДПИСКА =================
 
     async def mark_subscription_clicked(self, user_id: int):

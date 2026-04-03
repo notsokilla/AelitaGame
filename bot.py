@@ -123,6 +123,7 @@ class QueryMode(StatesGroup):
     admin_broadcast_text = State()
     admin_broadcast_media = State()
     admin_waiting_password = State()
+    admin_search_email = State()
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
@@ -207,6 +208,7 @@ def create_admin_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_stats")],
         [types.InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [types.InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+        [types.InlineKeyboardButton(text="🔍 Поиск по email", callback_data="admin_search_email")],
         [types.InlineKeyboardButton(text="🔍 Активность", callback_data="admin_activity")],
         [
             types.InlineKeyboardButton(text="🔓 Выйти", callback_data="admin_logout"),
@@ -850,7 +852,13 @@ async def admin_back(callback: CallbackQuery):
         await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
 
-    await callback.message.edit_text("⚙️ <b>Админ-панель</b>", reply_markup=create_admin_keyboard(), parse_mode="HTML")
+    await callback.state.clear()
+
+    await callback.message.edit_text(
+        "⚙️ <b>Админ-панель</b>",
+        reply_markup=create_admin_keyboard(),
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -867,6 +875,99 @@ async def admin_logout_callback(callback: CallbackQuery):
                                  reply_markup=create_main_keyboard(callback.from_user.id),
                                  parse_mode="HTML")
     await callback.answer("✅ Вы вышли")
+
+
+# ================= АДМИН: ПОИСК ПО EMAIL =================
+
+@dp.callback_query(F.data == "admin_search_email")
+async def admin_search_email_start(callback: CallbackQuery, state: FSMContext):
+    """Начать поиск пользователя по email"""
+    if not check_admin_session(callback.from_user.id):
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
+        return
+
+    await state.set_state(QueryMode.admin_search_email)
+    await callback.message.edit_text(
+        "🔍 <b>Поиск пользователя по email</b>\n\n"
+        "Введите полный email или часть email для поиска.\n"
+        "Например:\n"
+        "• user@example.com (точный поиск)\n"
+        "• @example.com (все пользователи с этим доменом)\n"
+        "• user (все пользователи с 'user' в email)\n\n"
+        "Для отмены: /cancel",
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+        ]),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.message(QueryMode.admin_search_email)
+async def admin_search_email_process(message: Message, state: FSMContext):
+    """Обработка запроса поиска по email"""
+    if not check_admin_session(message.from_user.id):
+        await message.answer("🔐 Сессия истекла. Введите /admin")
+        return
+
+    search_query = message.text.strip()
+
+    if len(search_query) < 2:
+        await message.answer(
+            "❌ <b>Слишком короткий запрос</b>\n\n"
+            "Введите минимум 2 символа для поиска.\n\n"
+            "Попробуйте ещё раз или /cancel для отмены",
+            parse_mode="HTML"
+        )
+        return
+
+    # Ищем пользователей
+    users = await db.search_users_by_email(search_query)
+
+    if not users:
+        await message.answer(
+            f"❌ <b>Пользователи не найдены</b>\n\n"
+            f"По запросу: <code>{search_query}</code>\n\n"
+            "Попробуйте другой запрос или /cancel для отмены",
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="🔙 Назад в админку", callback_data="admin_back")]
+            ]),
+            parse_mode="HTML"
+        )
+        await state.clear()
+        return
+
+    # Формируем результат
+    text = f"✅ <b>Найдено пользователей: {len(users)}</b>\n\n"
+    text += f"🔍 По запросу: <code>{search_query}</code>\n\n"
+
+    for i, user in enumerate(users[:20], 1):  # Показываем максимум 20
+        username = f"@{user['username']}" if user.get('username') else f"ID:{user['user_id']}"
+        email = user.get('email') or "❌ Не привязана"
+        msgs = user.get('total_messages', 0)
+        ai_req = user.get('total_ai_requests', 0)
+        sub = "✅" if user.get('subscription_clicked') else "❌"
+        registered = user.get('registered_at', 'N/A')[:10] if user.get('registered_at') else 'N/A'
+
+        text += f"{i}. {username}\n"
+        text += f"   📧 Email: <code>{email}</code>\n"
+        text += f"   💬 Сообщений: {msgs} | 🤖 ИИ: {ai_req}\n"
+        text += f"   📊 Подписка: {sub} | 📅 Регистрация: {registered}\n\n"
+
+    if len(users) > 20:
+        text += f"... и ещё {len(users) - 20} пользователей\n"
+
+    await message.answer(
+        text,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад в админку", callback_data="admin_back")],
+            [types.InlineKeyboardButton(text="🔄 Новый поиск", callback_data="admin_search_email")]
+        ]),
+        parse_mode="HTML"
+    )
+
+    await state.clear()
+    await db.log_action(message.from_user.id, "admin_search_email", search_query)
 
 
 # ================= CALLBACK: КАТЕГОРИИ =================
