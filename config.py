@@ -27,6 +27,7 @@ SUBSCRIPTION_URL = os.getenv("SUBSCRIPTION_URL_AC", "https://yoursite.com/subscr
 
 # ================= DATABASE =================
 DB_PATH = os.getenv("DB_PATH", "bot_database.db")
+GUIDES_DB_PATH = os.getenv("GUIDES_DB_PATH", "guides_database.db")
 
 # ================= PROXY =================
 PROXY_URL = os.getenv("PROXY_URL", "")

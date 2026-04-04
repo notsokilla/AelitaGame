@@ -11,7 +11,7 @@ import re
 import time
 from datetime import datetime
 from typing import Optional
-
+from guides_db import GuidesDatabase
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.types import Message, CallbackQuery
@@ -30,6 +30,7 @@ from database import Database
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database(DB_PATH)
+guides_db = GuidesDatabase(GUIDES_DB_PATH)
 
 client = AsyncOpenAI(api_key=NEURAL_API_KEY, base_url=NEURAL_BASE_URL)
 
@@ -366,7 +367,7 @@ async def handle_games_category(message: Message):
 async def handle_open_guides(message: Message):
     """Показать список гайдов"""
     user_id = message.from_user.id
-    guides = await db.get_guides(category='game')
+    guides = await guides_db.get_guides(category='game')
 
     if not guides:
         await message.answer(
@@ -449,7 +450,7 @@ async def handle_message(message: Message, state: FSMContext):
 @dp.callback_query(F.data == "user_guides_list")
 async def user_show_guides_list(callback: CallbackQuery):
     """Показать список гайдов пользователю"""
-    guides = await db.get_guides(category='game')
+    guides = await guides_db.get_guides(category='game')
     if not guides:
         await callback.answer("📭 Гайды пока не добавлены", show_alert=True)
         return
@@ -473,11 +474,11 @@ async def user_view_guide(callback: CallbackQuery):
     except (IndexError, ValueError):
         await callback.answer("❌ Гайд не найден", show_alert=True)
         return
-    guide = await db.get_guide(guide_id)
+    guide = await guides_db.get_guide(guide_id)
     if not guide:
         await callback.answer("❌ Гайд не найден", show_alert=True)
         return
-    await db.increment_guide_views(guide_id)
+    await guides_db.increment_guide_views(guide_id)
     text = f"📚 <b>{guide['title']}</b>\n\n{guide['description']}"
     try:
         if guide['media_type'] == 'photo' and guide['media_file_id']:
@@ -572,7 +573,7 @@ async def admin_guide_skip_media(message: Message, state: FSMContext):
 async def save_guide_with_media(message: Message, state: FSMContext, media_type: str, media_file_id: str):
     """Сохранение гайда в БД"""
     data = await state.get_data()
-    guide_id = await db.add_guide(title=data.get('title'), description=data.get('description'), category=data.get('category'), media_type=media_type, media_file_id=media_file_id, admin_id=data.get('admin_id'))
+    guide_id = await guides_db.add_guide(title=data.get('title'), description=data.get('description'), category=data.get('category'), media_type=media_type, media_file_id=media_file_id, admin_id=data.get('admin_id'))
     await state.clear()
     await message.answer(f"✅ <b>Гайд добавлен!</b>\n\n📋 ID: {guide_id}\n📝 Заголовок: {data.get('title')}\n📁 Категория: {data.get('category')}\n📷 Медиа: {media_type or 'нет'}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
 
@@ -583,7 +584,7 @@ async def admin_show_guides_list(callback: CallbackQuery):
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 /admin", show_alert=True)
         return
-    guides = await db.get_guides()
+    guides = await guides_db.get_guides()
     if not guides:
         text = "📭 <b>Гайды не найдены</b>\n\nДобавьте первый гайд через кнопку «➕ Добавить гайд»"
     else:
@@ -610,7 +611,7 @@ async def admin_guide_delete_confirm(callback: CallbackQuery):
     except (IndexError, ValueError):
         await callback.answer("❌ Ошибка", show_alert=True)
         return
-    guide = await db.get_guide(guide_id)
+    guide = await guides_db.get_guide(guide_id)
     if not guide:
         await callback.answer("❌ Гайд не найден", show_alert=True)
         return
@@ -629,7 +630,7 @@ async def admin_guide_delete_execute(callback: CallbackQuery):
     except (IndexError, ValueError):
         await callback.answer("❌ Ошибка", show_alert=True)
         return
-    success = await db.delete_guide(guide_id, callback.from_user.id)
+    success = await guides_db.delete_guide(guide_id, callback.from_user.id)
     if success:
         await callback.message.edit_text("✅ <b>Гайд удалён</b>", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
         await db.log_action(callback.from_user.id, "admin_guide_deleted", str(guide_id))
@@ -644,7 +645,7 @@ async def admin_show_guides_stats(callback: CallbackQuery):
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 /admin", show_alert=True)
         return
-    stats = await db.get_guides_stats()
+    stats = await guides_db.get_guides_stats()
     text = f"📊 <b>Статистика гайдов</b>\n\n📚 Всего гайдов: {stats['total'] or 0}\n👁️ Всего просмотров: {stats['total_views'] or 0}\n📷 С фото: {stats['with_photo'] or 0}\n🎬 С видео: {stats['with_video'] or 0}\n📄 Только текст: {(stats['total'] or 0) - (stats['with_photo'] or 0) - (stats['with_video'] or 0)}"
     await callback.message.edit_text(text, reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
     await callback.answer()
@@ -1068,6 +1069,7 @@ async def main():
     """Точка входа"""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
     await db.connect()
+    await guides_db.connect()
     session = AiohttpSession()
     global bot
     bot = Bot(token=BOT_TOKEN, session=session)
@@ -1083,6 +1085,7 @@ async def main():
     finally:
         await bot.session.close()
         await db.close()
+        await guides_db.close()
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ service_account.json
 *.sqlite
 *.sqlite3
 bot_database.db
+guides_database.db
 
 # ================= LOGS =================
 *.log

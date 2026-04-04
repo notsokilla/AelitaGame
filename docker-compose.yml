@@ -12,6 +12,7 @@ services:
     environment:
       - TZ=Europe/Moscow
       - DB_PATH=/app/data/bot_database.db
+      - GUIDES_DB_PATH=/app/data/guides_database.db
 
     volumes:
       - bot_data:/app/data
