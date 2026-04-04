@@ -25,4 +25,4 @@ networks:
 
 volumes:
   bot_data:
-    name: ai-game-bot-data
+    name: aelita-game-bot-data
