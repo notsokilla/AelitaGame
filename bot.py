@@ -41,6 +41,8 @@ failed_login_attempts: dict[int, list[float]] = {}
 MAX_FAILED_ATTEMPTS = 3
 LOCKOUT_DURATION = 300
 USERS_PER_PAGE = 20
+GUIDES_PER_PAGE = 5
+MEDIA_PER_PAGE = 10
 
 
 def check_admin_session(user_id: int) -> bool:
@@ -220,6 +222,33 @@ def create_admin_guides_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_guide_stats")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
     ])
+
+
+def create_guides_page_keyboard(current_page: int, total_pages: int) -> types.InlineKeyboardMarkup:
+    """Кнопки навигации по страницам гайдов"""
+    buttons = []
+    row = []
+    if current_page > 1:
+        row.append(types.InlineKeyboardButton(text="⬅️ Назад", callback_data=f"guides_page_{current_page - 1}"))
+    row.append(types.InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="ignore"))
+    if current_page < total_pages:
+        row.append(types.InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"guides_page_{current_page + 1}"))
+    buttons.append(row)
+    buttons.append([types.InlineKeyboardButton(text="🔙 Назад в админку", callback_data="admin_back")])
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def create_media_page_keyboard(current_page: int, total_pages: int, base_callback: str) -> types.InlineKeyboardMarkup:
+    """Кнопки навигации по страницам медиа-библиотеки"""
+    buttons = []
+    row = []
+    if current_page > 1:
+        row.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"{base_callback}_page_{current_page - 1}"))
+    row.append(types.InlineKeyboardButton(text=f"📄 {current_page}/{total_pages}", callback_data="ignore"))
+    if current_page < total_pages:
+        row.append(types.InlineKeyboardButton(text="➡️", callback_data=f"{base_callback}_page_{current_page + 1}"))
+    buttons.append(row)
+    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ================= ОБРАБОТЧИКИ: ПОЛЬЗОВАТЕЛЬ =================
@@ -552,70 +581,160 @@ async def admin_guide_add_description_received(message: Message, state: FSMConte
     await message.answer("3️⃣ Выберите <b>категорию</b>:\n\n• game — Игры (Dota 2, CS2, LoL)\n• learn — Обучение\n• tech — Технологии\n\nНапишите: game, learn или tech\n\nДля отмены: /cancel")
 
 
+# 🔧 ИСПРАВЛЕНО: Разделили хендлеры на два отдельных
+
 @dp.message(QueryMode.admin_guide_add_category)
 async def admin_guide_add_category_received(message: Message, state: FSMContext):
-    """Получение категории гайда"""
+    """Получение категории гайда через сообщение"""
     if not check_admin_session(message.from_user.id):
         return
+
     category = message.text.strip().lower()
     if category not in ['game', 'learn', 'tech']:
         await message.answer("❌ Неверная категория. Напишите: game, learn или tech")
         return
+
     await state.update_data(category=category)
     await state.set_state(QueryMode.admin_guide_select_media)
 
-    media = await guides_db.get_media_from_library(limit=20)
+    # Показываем выбор медиа (страница 1)
+    await _show_media_selection(message, state, page=1)
+
+
+@dp.callback_query(F.data.startswith("guide_media_select_page_"))
+async def admin_guide_media_page_callback(callback: CallbackQuery, state: FSMContext):
+    """Пагинация в выборе медиа для гайда"""
+    if not check_admin_session(callback.from_user.id):
+        await callback.answer("🔐 /admin", show_alert=True)
+        return
+
+    # Получаем номер страницы
+    try:
+        page = int(callback.data.split("_")[-1])
+    except (IndexError, ValueError):
+        page = 1
+
+    # Проверяем что категория выбрана
+    data = await state.get_data()
+    if not data.get('category'):
+        await callback.answer("❌ Сначала выберите категорию", show_alert=True)
+        return
+
+    # Показываем выбор медиа с нужной страницы
+    await _show_media_selection(callback, state, page=page)
+    await callback.answer()
+
+
+async def _show_media_selection(target, state: FSMContext, page: int):
+    """Внутренняя функция: показывает выбор медиа (универсально для Message/CallbackQuery)"""
+    # Получаем медиа из библиотеки
+    media = await guides_db.get_media_from_library(limit=200)
+    total_media = len(media)
+    total_pages = (total_media + MEDIA_PER_PAGE - 1) // MEDIA_PER_PAGE
+
+    # Корректируем страницу
+    if page < 1:
+        page = 1
+    if page > total_pages and total_pages > 0:
+        page = total_pages
+
+    start_idx = (page - 1) * MEDIA_PER_PAGE
+    end_idx = start_idx + MEDIA_PER_PAGE
+    page_media = media[start_idx:end_idx]
+
+    # Формируем текст
     text = "4️⃣ <b>Выберите медиа для гайда</b>\n\n"
 
-    if not media:
-        text += "📭 <b>Библиотека пуста!</b>\n\nСначала загрузите файлы в медиа-библиотеку:\n1. Нажмите 🔙 Назад\n2. Выберите 📚 Медиа-библиотека\n3. Загрузите файлы\n\nИли напишите /skip чтобы продолжить без медиа"
+    if not page_media and total_media == 0:
+        text += "📭 <b>Библиотека пуста!</b>\n\n"
+        text += "Сначала загрузите файлы в медиа-библиотеку:\n"
+        text += "1. Нажмите 🔙 Назад\n"
+        text += "2. Выберите 📚 Медиа-библиотека\n"
+        text += "3. Загрузите файлы\n\n"
+        text += "Или напишите /skip чтобы продолжить без медиа"
+
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="⏭️ Пропустить", callback_data="guide_media_skip")],
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_guide_add")]
         ])
     else:
-        text += "📁 <b>Доступные файлы:</b>\n\n"
-        for i, m in enumerate(media[:10], 1):
+        text += f"📁 <b>Доступные файлы</b> (стр. {page}/{total_pages}):\n\n"
+        for i, m in enumerate(page_media, start_idx + 1):
             emoji = '📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'
             text += f"{i}. {emoji} <code>{m['file_name'] or 'Без имени'}</code> ({m['file_type']})\n"
-        if len(media) > 10:
-            text += f"... и ещё {len(media) - 10} файлов\n"
-        text += "\n<b>Выберите файлы:</b>\n• Отправьте номера файлов через запятую (например: 1,3,5)\n• Или напишите /skip чтобы пропустить\n• Или /cancel для отмены"
+        if total_media > MEDIA_PER_PAGE:
+            text += f"\n📊 Показано {len(page_media)} из {total_media}\n"
+
+        text += "\n<b>Выберите файлы:</b>\n"
+        text += "• Отправьте номера файлов через запятую (например: 1,3,5)\n"
+        text += "• Или напишите /skip чтобы пропустить\n"
+        text += "• Или /cancel для отмены"
+
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="📤 Загрузить новые файлы", callback_data="admin_media_upload_start")],
             [types.InlineKeyboardButton(text="⏭️ Пропустить", callback_data="guide_media_skip")]
         ])
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+        # Добавляем пагинацию если страниц больше 1
+        if total_pages > 1:
+            pagination_kb = create_media_page_keyboard(page, total_pages, "guide_media_select")
+            for btn_row in pagination_kb.inline_keyboard:
+                keyboard.inline_keyboard.append(btn_row)
+
+    # Отправляем ответ (универсально для Message или CallbackQuery)
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    elif isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @dp.message(QueryMode.admin_guide_select_media)
 async def admin_guide_select_media_from_library(message: Message, state: FSMContext):
-    """Выбор медиа из библиотеки по номерам"""
+    """Выбор медиа из библиотеки по номерам (с учётом пагинации)"""
     if not check_admin_session(message.from_user.id):
         return
     text = message.text.strip()
+
+    # Проверка на пропуск
     if text.lower() == '/skip':
         await _save_guide_with_selected_media(message, state, [])
         return
+
+    # Парсим номера файлов
     try:
         numbers = [int(n.strip()) for n in text.replace(',', ' ').split() if n.strip().isdigit()]
     except ValueError:
         await message.answer("❌ <b>Неверный формат</b>\n\nОтправьте номера файлов через запятую (например: 1,3,5)\nИли напишите /skip чтобы пропустить", parse_mode="HTML")
         return
+
     if not numbers:
         await message.answer("❌ <b>Не выбрано ни одного файла</b>\n\nОтправьте номера файлов или напишите /skip", parse_mode="HTML")
         return
 
-    media = await guides_db.get_media_from_library(limit=20)
-    selected_media = [media[num - 1] for num in numbers if 1 <= num <= len(media)]
+    # Получаем ВСЕ медиа из библиотеки (не только текущую страницу!)
+    all_media = await guides_db.get_media_from_library(limit=200)
+
+    # Выбираем файлы по глобальным номерам (1 = первый в библиотеке, не на странице)
+    selected_media = []
+    for num in numbers:
+        if 1 <= num <= len(all_media):
+            selected_media.append(all_media[num - 1])
+
     if not selected_media:
         await message.answer("❌ <b>Файлы не найдены</b>\n\nПроверьте номера и попробуйте снова", parse_mode="HTML")
         return
 
+    # Сохраняем выбранные медиа в состоянии
     await state.update_data(selected_media=selected_media)
     await state.set_state(QueryMode.admin_guide_media_confirm)
-    confirm_text = "✅ <b>Выбрано файлов:</b>\n\n" + "\n".join(f"{i}. {'📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'} {m['file_name'] or 'Без имени'}" for i, m in enumerate(selected_media, 1))
+
+    # Показываем подтверждение
+    confirm_text = "✅ <b>Выбрано файлов:</b>\n\n" + "\n".join(
+        f"{i}. {'📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'} {m['file_name'] or 'Без имени'}"
+        for i, m in enumerate(selected_media, 1)
+    )
     confirm_text += "\n<b>Подтвердите создание гайда:</b>"
+
     await message.answer(confirm_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="✅ Создать гайд", callback_data="guide_media_confirm_create")],
         [types.InlineKeyboardButton(text="🔄 Выбрать другие", callback_data="admin_guide_add")],
@@ -669,48 +788,74 @@ async def admin_guide_media_skip(callback: CallbackQuery, state: FSMContext):
 
 
 @dp.callback_query(F.data == "admin_guide_list")
+@dp.callback_query(F.data.startswith("guides_page_"))
 async def admin_show_guides_list(callback: CallbackQuery):
-    """Показать список гайдов админу с кнопками удаления"""
+    """Показать список гайдов админу с пагинацией"""
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 /admin", show_alert=True)
         return
 
-    guides = await guides_db.get_guides()
+    # Определяем номер страницы из callback_data
+    page = 1
+    if callback.data.startswith("guides_page_"):
+        try:
+            page = int(callback.data.split("_")[-1])
+        except (IndexError, ValueError):
+            page = 1
 
-    if not guides:
+    # Получаем все гайды
+    guides = await guides_db.get_guides()
+    total_guides = len(guides)
+    total_pages = (total_guides + GUIDES_PER_PAGE - 1) // GUIDES_PER_PAGE
+
+    # Корректируем страницу если вышла за границы
+    if page < 1:
+        page = 1
+    if page > total_pages and total_pages > 0:
+        page = total_pages
+
+    # Вырезаем гайды для текущей страницы
+    start_idx = (page - 1) * GUIDES_PER_PAGE
+    end_idx = start_idx + GUIDES_PER_PAGE
+    page_guides = guides[start_idx:end_idx]
+
+    # Формируем текст
+    if not page_guides and total_guides == 0:
         text = "📭 <b>Гайды не найдены</b>\n\n"
         text += "Добавьте первый гайд через кнопку «➕ Добавить гайд»"
-        await callback.message.edit_text(
-            text,
-            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="➕ Добавить", callback_data="admin_guide_add")],
-                [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
-            ]),
-            parse_mode="HTML"
-        )
-        await callback.answer()
-        return
+    else:
+        text = f"📋 <b>Список гайдов</b> ({page}/{total_pages})\n\n"
 
-    text = f"📋 <b>Список гайдов</b> ({len(guides)})\n\n"
+        for i, guide in enumerate(page_guides, start_idx + 1):
+            media_count = len(await guides_db.get_guide_media(guide['id']))
+            emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] in ['video', 'animation'] else '📎' if guide['media_type'] else '📄'
+
+            text += f"{i}. {emoji} <code>{guide['title']}</code>\n"
+            text += f"   Категория: {guide['category']} | 👁️ {guide['views']} | 📎 {media_count} файл(ов)\n"
+            text += f"   ID: <code>{guide['id']}</code>\n\n"
+
+        if total_guides > GUIDES_PER_PAGE:
+            text += f"📊 Всего: {total_guides} гайдов"
+
+    # Формируем inline-кнопки для гайдов на текущей странице
     inline_keyboard = []
-
-    for i, guide in enumerate(guides[:15], 1):
-        media_count = len(await guides_db.get_guide_media(guide['id']))
-        emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] in ['video', 'animation'] else '📎' if guide['media_type'] else '📄'
-        text += f"{i}. {emoji} <code>{guide['title']}</code>\n"
-        text += f"   Категория: {guide['category']} | 👁️ {guide['views']} | 📎 {media_count} файл(ов)\n"
-        text += f"   ID: <code>{guide['id']}</code>\n\n"
-        # 🔧 ИСПРАВЛЕНО: используем "confirm" префикс для кнопки удаления в списке
+    for guide in page_guides:
         inline_keyboard.append([
             types.InlineKeyboardButton(text="📖 Открыть", callback_data=f"user_guide_view_{guide['id']}"),
             types.InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"admin_guide_delete_confirm_{guide['id']}")
         ])
 
-    if len(guides) > 15:
-        text += f"... и ещё {len(guides) - 15}\n"
+    # Добавляем кнопки управления
+    if total_guides > 0:
+        inline_keyboard.append([types.InlineKeyboardButton(text="➕ Добавить новый", callback_data="admin_guide_add")])
 
-    inline_keyboard.append([types.InlineKeyboardButton(text="➕ Добавить новый", callback_data="admin_guide_add")])
-    inline_keyboard.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+    # Добавляем пагинацию если страниц больше 1
+    if total_pages > 1:
+        pagination_kb = create_guides_page_keyboard(page, total_pages)
+        for btn_row in pagination_kb.inline_keyboard:
+            inline_keyboard.append(btn_row)
+    else:
+        inline_keyboard.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
 
     await callback.message.edit_text(
         text,
@@ -720,7 +865,6 @@ async def admin_show_guides_list(callback: CallbackQuery):
     await callback.answer()
 
 
-# 🔧 ИСПРАВЛЕНО: префикс "confirm" для окна подтверждения
 @dp.callback_query(F.data.startswith("admin_guide_delete_confirm_"))
 async def admin_guide_delete_confirm(callback: CallbackQuery):
     """Подтверждение удаления гайда"""
@@ -749,7 +893,6 @@ async def admin_guide_delete_confirm(callback: CallbackQuery):
         await callback.message.edit_text(
             confirm_text,
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                # 🔧 ИСПРАВЛЕНО: используем "execute" префикс для кнопки подтверждения
                 [types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_guide_delete_execute_{guide_id}"),
                  types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_guide_list")]
             ]),
@@ -763,7 +906,6 @@ async def admin_guide_delete_confirm(callback: CallbackQuery):
     await callback.answer()
 
 
-# 🔧 ИСПРАВЛЕНО: префикс "execute" для фактического удаления
 @dp.callback_query(F.data.startswith("admin_guide_delete_execute_"))
 async def admin_guide_delete_execute(callback: CallbackQuery):
     """Удаление гайда — ВЕРСИЯ С ОТЛАДКОЙ"""
@@ -786,12 +928,10 @@ async def admin_guide_delete_execute(callback: CallbackQuery):
         media_list = await guides_db.get_guide_media(guide_id)
         print(f"📎 DEBUG: Найдено {len(media_list)} связанных файлов")
 
-        # Удаляем связи с медиа
         await guides_db._connection.execute("DELETE FROM guide_media WHERE guide_id = ?", (guide_id,))
         await guides_db._connection.commit()
         print("🗑️ DEBUG: Связи с медиа удалены")
 
-        # Удаляем сам гайд
         cursor = await guides_db._connection.execute("DELETE FROM guides WHERE id = ?", (guide_id,))
         await guides_db._connection.commit()
         print(f"🗑️ DEBUG: Удалено строк: {cursor.rowcount}")
@@ -859,27 +999,60 @@ async def refresh_menu_callback(callback: CallbackQuery):
 # ================= АДМИН: МЕДИА-БИБЛИОТЕКА =================
 
 @dp.callback_query(F.data == "admin_media_library")
+@dp.callback_query(F.data.startswith("admin_media_library_page_"))
 async def admin_media_library_menu(callback: CallbackQuery):
-    """Меню медиа-библиотеки"""
+    """Меню медиа-библиотеки с пагинацией"""
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
-    media = await guides_db.get_media_from_library(limit=20)
+
+    page = 1
+    if callback.data.startswith("admin_media_library_page_"):
+        try:
+            page = int(callback.data.split("_")[-1])
+        except (IndexError, ValueError):
+            page = 1
+
+    media = await guides_db.get_media_from_library(limit=200)
+    total_media = len(media)
+    total_pages = (total_media + MEDIA_PER_PAGE - 1) // MEDIA_PER_PAGE
+
+    if page < 1:
+        page = 1
+    if page > total_pages and total_pages > 0:
+        page = total_pages
+
+    start_idx = (page - 1) * MEDIA_PER_PAGE
+    end_idx = start_idx + MEDIA_PER_PAGE
+    page_media = media[start_idx:end_idx]
+
     text = "📚 <b>Медиа-библиотека</b>\n\n"
-    if not media:
+    if not page_media and total_media == 0:
         text += "📭 Библиотека пуста\n\nОтправьте файлы для добавления в библиотеку."
     else:
-        text += f"📁 Всего файлов: {len(media)}\n\n"
-        for i, m in enumerate(media[:10], 1):
+        text += f"📁 Всего файлов: {total_media} (стр. {page}/{total_pages})\n\n"
+        for i, m in enumerate(page_media, start_idx + 1):
             emoji = '📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'
-            text += f"{i}. {emoji} {m['file_name'] or 'Без имени'} ({m['file_type']})\n"
+            text += f"{i}. {emoji} <code>{m['file_name'] or 'Без имени'}</code> ({m['file_type']})\n"
             text += f"   👁️ Использований: {m['usage_count']}\n\n"
-        if len(media) > 10:
-            text += f"... и ещё {len(media) - 10} файлов\n"
-    await callback.message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="📤 Загрузить файлы", callback_data="admin_media_upload_start")],
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_guides")]
-    ]), parse_mode="HTML")
+        if total_media > MEDIA_PER_PAGE:
+            text += f"📊 Показано {len(page_media)} из {total_media}\n"
+
+    inline_keyboard = []
+    inline_keyboard.append([types.InlineKeyboardButton(text="📤 Загрузить файлы", callback_data="admin_media_upload_start")])
+
+    if total_pages > 1:
+        pagination_kb = create_media_page_keyboard(page, total_pages, "admin_media_library")
+        for btn_row in pagination_kb.inline_keyboard:
+            inline_keyboard.append(btn_row)
+
+    inline_keyboard.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_guides")])
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard),
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 
