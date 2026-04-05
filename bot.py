@@ -11,7 +11,7 @@ import re
 import time
 from datetime import datetime
 from typing import Optional
-from guides_db import GuidesDatabase
+
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.types import Message, CallbackQuery
@@ -25,24 +25,21 @@ from openai import AsyncOpenAI
 # Наши модули
 from config import *
 from database import Database
+from guides_db import GuidesDatabase
 
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database(DB_PATH)
 guides_db = GuidesDatabase(GUIDES_DB_PATH)
-
 client = AsyncOpenAI(api_key=NEURAL_API_KEY, base_url=NEURAL_BASE_URL)
 
 # ================= АДМИН СЕССИИ =================
 admin_sessions: dict[int, float] = {}
 ADMIN_SESSION_DURATION = 3600
-
 failed_login_attempts: dict[int, list[float]] = {}
 MAX_FAILED_ATTEMPTS = 3
 LOCKOUT_DURATION = 300
-
-# Пагинация пользователей
 USERS_PER_PAGE = 20
 
 
@@ -69,50 +66,12 @@ def logout_admin(user_id: int):
 
 # ================= ПРОМПТЫ =================
 PROMPTS = {
-    "math": """
-Ты — эксперт-математик и преподаватель. Решай задачи с ПОШАГОВЫМ объяснением.
-ПРАВИЛА:
-1. Всегда показывай ход решения шаг за шагом
-2. Объясняй каждую операцию простым языком
-3. Используй формулы: x², √, ∫, ∑
-КАТЕГОРИИ: Алгебра • Геометрия • Статистика
-    """,
-    "search": """
-Ты — аналитик. Находи и структурируй информацию.
-ПРАВИЛА:
-1. Давай точные факты
-2. Структурируй ответ: заголовки, списки
-3. Указывай дату актуальности
-    """,
-    "consult": """
-Ты — универсальный консультант. Давай полезные ответы.
-ПРАВИЛА:
-1. Адаптируй сложность под вопрос
-2. Давай практические рекомендации
-3. Предлагай альтернативы
-    """,
-    "learn": """
-Ты — педагог. Объясняй сложное просто.
-ПРАВИЛА:
-1. Используй аналогии
-2. Разбивай на простые шаги
-3. Давай советы по запоминанию
-    """,
-    "game": """
-Ты — геймер-аналитик. Помогай с билдами и стратегиями.
-ПРАВИЛА:
-1. Указывай актуальность (патч, мета)
-2. Давай конкретные цифры
-3. Предлагай альтернативы
-ИГРЫ: Dota 2 • CS2 • LoL • Valorant
-    """,
-    "news": """
-Ты — новостной обозреватель. Анализируй тренды.
-ПРАВИЛА:
-1. Указывай дату и источник
-2. Разделяй факты и мнения
-3. Выделяй ключевые тренды
-    """
+    "math": "Ты — эксперт-математик и преподаватель. Решай задачи с ПОШАГОВЫМ объяснением.\nПРАВИЛА:\n1. Всегда показывай ход решения шаг за шагом\n2. Объясняй каждую операцию простым языком\n3. Используй формулы: x², √, ∫, ∑\nКАТЕГОРИИ: Алгебра • Геометрия • Статистика",
+    "search": "Ты — аналитик. Находи и структурируй информацию.\nПРАВИЛА:\n1. Давай точные факты\n2. Структурируй ответ: заголовки, списки\n3. Указывай дату актуальности",
+    "consult": "Ты — универсальный консультант. Давай полезные ответы.\nПРАВИЛА:\n1. Адаптируй сложность под вопрос\n2. Давай практические рекомендации\n3. Предлагай альтернативы",
+    "learn": "Ты — педагог. Объясняй сложное просто.\nПРАВИЛА:\n1. Используй аналогии\n2. Разбивай на простые шаги\n3. Давай советы по запоминанию",
+    "game": "Ты — геймер-аналитик. Помогай с билдами и стратегиями.\nПРАВИЛА:\n1. Указывай актуальность (патч, мета)\n2. Давай конкретные цифры\n3. Предлагай альтернативы\nИГРЫ: Dota 2 • CS2 • LoL • Valorant",
+    "news": "Ты — новостной обозреватель. Анализируй тренды.\nПРАВИЛА:\n1. Указывай дату и источник\n2. Разделяй факты и мнения\n3. Выделяй ключевые тренды"
 }
 
 
@@ -132,6 +91,9 @@ class QueryMode(StatesGroup):
     admin_guide_list = State()
     admin_guide_delete_confirm = State()
     viewing_guides = State()
+    admin_media_upload = State()
+    admin_guide_select_media = State()
+    admin_guide_media_confirm = State()
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
@@ -175,8 +137,7 @@ async def call_neural_api(prompt_type: str, user_query: str) -> str:
                 {"role": "system", "content": PROMPTS.get(prompt_type, PROMPTS['consult']) + "\n\nВАЖНО: Отвечай кратко, не более 3000 символов."},
                 {"role": "user", "content": user_query}
             ],
-            temperature=0.7,
-            max_tokens=800
+            temperature=0.7, max_tokens=800
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -187,11 +148,11 @@ async def call_neural_api(prompt_type: str, user_query: str) -> str:
 # ================= КЛАВИАТУРЫ =================
 
 def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
-    """Главное меню"""
+    """Главное меню с кнопкой гайдов"""
     keyboard = [
         [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
         [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
-        [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
+        [types.KeyboardButton(text="📚 Гайды"), types.KeyboardButton(text="📰 Новости")],
     ]
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
     return types.ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -218,10 +179,8 @@ def create_admin_keyboard() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="📚 Гайды", callback_data="admin_guides")],
         [types.InlineKeyboardButton(text="🔍 Поиск по email", callback_data="admin_search_email")],
         [types.InlineKeyboardButton(text="🔍 Активность", callback_data="admin_activity")],
-        [
-            types.InlineKeyboardButton(text="🔓 Выйти", callback_data="admin_logout"),
-            types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")
-        ]
+        [types.InlineKeyboardButton(text="🔓 Выйти", callback_data="admin_logout"),
+         types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -240,29 +199,27 @@ def create_users_page_keyboard(current_page: int, total_pages: int) -> types.Inl
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def create_guides_keyboard(category: str = 'game') -> types.InlineKeyboardMarkup:
+def create_guides_keyboard(category: str = 'game', admin_mode: bool = False) -> types.InlineKeyboardMarkup:
     """Кнопки для просмотра гайдов"""
-    return types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="🔙 Назад", callback_data=f"cat_{category}")]
-    ])
+    if admin_mode:
+        return types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 К списку гайдов", callback_data="admin_guide_list")]
+        ])
+    else:
+        return types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="guides_menu_back")]
+        ])
 
 
 def create_admin_guides_keyboard() -> types.InlineKeyboardMarkup:
     """Кнопки админ-панели для управления гайдами"""
     return types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="➕ Добавить гайд", callback_data="admin_guide_add")],
+        [types.InlineKeyboardButton(text="📚 Медиа-библиотека", callback_data="admin_media_library")],
         [types.InlineKeyboardButton(text="📋 Список гайдов", callback_data="admin_guide_list")],
         [types.InlineKeyboardButton(text="📊 Статистика", callback_data="admin_guide_stats")],
         [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
     ])
-
-
-def create_guide_item_keyboard(guide_id: int, admin_mode: bool = False) -> types.InlineKeyboardMarkup:
-    """Кнопки для отдельного гайда"""
-    buttons = [[types.InlineKeyboardButton(text="🔙 Назад к списку", callback_data="admin_guide_list")]]
-    if admin_mode:
-        buttons.insert(0, [types.InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"admin_guide_delete_{guide_id}")])
-    return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 # ================= ОБРАБОТЧИКИ: ПОЛЬЗОВАТЕЛЬ =================
@@ -333,53 +290,36 @@ async def handle_subscription_help(message: Message):
     )
 
 
-# ================= ОБРАБОТЧИКИ: КНОПКИ МЕНЮ (ПЕРЕД ОБЩИМ!) =================
+# ================= ОБРАБОТЧИКИ: КНОПКИ МЕНЮ =================
 
-@dp.message(F.text == "🎮 Игры")
-async def handle_games_category(message: Message):
-    """Кнопка Игры — показывает стандартный ответ + кнопку гайдов"""
-    user_id = message.from_user.id
-    await db.increment_message_count(user_id)
-    await db.log_action(user_id, "category_games", "Games button clicked")
-
-    guides_keyboard = types.ReplyKeyboardMarkup(
-        keyboard=[
-            [types.KeyboardButton(text="📚 Открыть гайды")],
-            [types.KeyboardButton(text="🔙 Назад в меню")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
+@dp.message(F.text == "📚 Гайды")
+async def handle_guides_categories(message: Message):
+    """Показ категорий гайдов"""
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🎮 Игры", callback_data="guides_cat_game")],
+        [types.InlineKeyboardButton(text="🎓 Обучение", callback_data="guides_cat_learn")],
+        [types.InlineKeyboardButton(text="💻 Техника", callback_data="guides_cat_tech")],
+    ])
     await message.answer(
-        "🎮 <b>Игры и гейминг</b>\n\n"
-        "Я помогу с:\n"
-        "• 🎯 Билдами и прокачкой персонажей\n"
-        "• 📊 Анализом меты и патчей\n"
-        "• 🧠 Стратегиями и тактиками\n"
-        "• 🔍 Гайдами по играм: Dota 2, CS2, LoL, Valorant и другим\n\n"
-        "Напишите ваш вопрос или нажмите кнопку ниже 👇",
-        reply_markup=guides_keyboard,
-        parse_mode="HTML"
+        "📚 <b>Выберите категорию гайдов:</b>\n\nЗдесь вы найдете полезные материалы и инструкции.",
+        reply_markup=keyboard, parse_mode="HTML"
     )
 
 
-@dp.message(F.text == "📚 Открыть гайды")
-async def handle_open_guides(message: Message):
-    """Показать список гайдов"""
-    user_id = message.from_user.id
-    guides = await guides_db.get_guides(category='game')
+@dp.callback_query(F.data.startswith("guides_cat_"))
+async def show_guides_by_category(callback: CallbackQuery):
+    """Показ гайдов по выбранной категории"""
+    category = callback.data.split("_")[-1]
+    category_names = {'game': '🎮 Игры', 'learn': '🎓 Обучение', 'tech': '💻 Техника'}
+    guides = await guides_db.get_guides(category=category)
 
     if not guides:
-        await message.answer(
-            "📭 <b>Гайды пока не добавлены</b>\n\nПопробуйте позже или напишите свой вопрос — я помогу!",
-            reply_markup=create_main_keyboard(user_id),
-            parse_mode="HTML"
-        )
+        await callback.answer("📭 В этой категории пока нет гайдов", show_alert=True)
         return
 
-    text = "📚 <b>Доступные гайды</b>\n\n"
+    text = f"{category_names.get(category, '📚')} <b>Гайды</b>\n\n"
     for i, guide in enumerate(guides[:10], 1):
-        emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] == 'video' else '📄'
+        emoji = '📷' if guide['media_type'] in ['photo'] else '🎬' if guide['media_type'] in ['video', 'animation'] else '📎'
         text += f"{i}. {emoji} <b>{guide['title']}</b>\n"
         text += f"   {guide['description'][:100]}{'...' if len(guide['description']) > 100 else ''}\n"
         text += f"   👁️ Просмотров: {guide['views']}\n\n"
@@ -387,22 +327,71 @@ async def handle_open_guides(message: Message):
         text += f"... и ещё {len(guides) - 10} гайдов\n"
 
     inline_buttons = [[types.InlineKeyboardButton(text=f"📖 {guide['title'][:30]}", callback_data=f"user_guide_view_{guide['id']}")] for guide in guides[:10]]
-    await message.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_buttons), parse_mode="HTML")
-    await message.answer("Выберите категорию:", reply_markup=create_main_keyboard(user_id))
+    inline_buttons.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="guides_menu_back")])
+
+    await callback.message.answer(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_buttons), parse_mode="HTML")
+    await callback.answer()
 
 
-@dp.message(F.text == "🔙 Назад в меню")
-async def handle_back_to_menu(message: Message):
-    """Вернуться в главное меню"""
+@dp.callback_query(F.data == "guides_menu_back")
+async def guides_menu_back(callback: CallbackQuery):
+    """Возврат к выбору категорий гайдов"""
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🎮 Игры", callback_data="guides_cat_game")],
+        [types.InlineKeyboardButton(text="🎓 Обучение", callback_data="guides_cat_learn")],
+        [types.InlineKeyboardButton(text="💻 Техника", callback_data="guides_cat_tech")],
+    ])
+    try:
+        await callback.message.edit_text(
+            "📚 <b>Выберите категорию гайдов:</b>\n\nЗдесь вы найдете полезные материалы и инструкции.",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await callback.answer("✅ Меню категорий", show_alert=False)
+        elif "message can't be edited" in str(e):
+            try:
+                await callback.message.answer(
+                    "📚 <b>Выберите категорию гайдов:</b>\n\nЗдесь вы найдете полезные материалы и инструкции.",
+                    reply_markup=keyboard, parse_mode="HTML"
+                )
+                await callback.message.delete()
+            except:
+                pass
+        else:
+            raise
+    except Exception as e:
+        logging.error(f"Ошибка в guides_menu_back: {e}")
+        await callback.message.answer(
+            "📚 <b>Выберите категорию гайдов:</b>\n\nЗдесь вы найдете полезные материалы и инструкции.",
+            reply_markup=keyboard, parse_mode="HTML"
+        )
+    await callback.answer()
+
+
+@dp.message(F.text == "🎮 Игры")
+async def handle_games_category(message: Message):
+    """Кнопка Игры — только стандартный ответ"""
     user_id = message.from_user.id
-    await message.answer("🔙 <b>Возврат в главное меню</b>", reply_markup=create_main_keyboard(user_id), parse_mode="HTML")
+    await db.increment_message_count(user_id)
+    await db.log_action(user_id, "category_games", "Games button clicked")
+    await message.answer(
+        "🎮 <b>Игры и гейминг</b>\n\n"
+        "Я помогу с:\n"
+        "• 🎯 Билдами и прокачкой персонажей\n"
+        "• 📊 Анализом меты и патчей\n"
+        "• 🧠 Стратегиями и тактиками\n"
+        "• 🔍 Гайдами по играм: Dota 2, CS2, LoL, Valorant и другим\n\n"
+        "Напишите ваш вопрос 👇",
+        parse_mode="HTML"
+    )
 
 
-# ================= ЕДИНСТВЕННЫЙ ОБЩИЙ @dp.message() ХЕНДЛЕР (ПОСЛЕДНИМ!) =================
+# ================= ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ (ПОСЛЕДНИМ!) =================
 
 @dp.message(~F.text.startswith('/'), StateFilter(None))
 async def handle_message(message: Message, state: FSMContext):
-    """Основной обработчик сообщений: email + ИИ"""
+    """Основной обработчик: email + ИИ"""
     if not message.text:
         return
     text = message.text.strip()
@@ -418,9 +407,7 @@ async def handle_message(message: Message, state: FSMContext):
                 f"📋 <b>В личном кабинете вы можете:</b>\n"
                 f"• ✅ Проверить статус подписки\n• ❌ <b>Отменить подписку</b> в любой момент\n• 📊 Получить доступ ко всем материалам\n\n"
                 f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\nИспользуйте кнопки в меню для выбора категории.",
-                reply_markup=create_main_keyboard(user_id),
-                parse_mode="HTML",
-                disable_web_page_preview=False
+                reply_markup=create_main_keyboard(user_id), parse_mode="HTML", disable_web_page_preview=False
             )
             await db.log_action(user_id, "email_linked", text)
         except Exception as e:
@@ -428,7 +415,6 @@ async def handle_message(message: Message, state: FSMContext):
             await message.answer("❌ <b>Не удалось привязать почту</b>\n\nПопробуйте позже или обратитесь в поддержку: @samoylov1smm", parse_mode="HTML")
         return
 
-    # Обработка ИИ
     await db.increment_message_count(user_id)
     await db.log_action(user_id, "message", text[:100])
     category = detect_category(text)
@@ -445,51 +431,79 @@ async def handle_message(message: Message, state: FSMContext):
             await message.answer(f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...", reply_markup=create_inline_categories(), parse_mode="HTML")
 
 
-# ================= ПОЛЬЗОВАТЕЛЬ: ПРОСМОТР ГАЙДОВ (CALLBACK) =================
-
-@dp.callback_query(F.data == "user_guides_list")
-async def user_show_guides_list(callback: CallbackQuery):
-    """Показать список гайдов пользователю"""
-    guides = await guides_db.get_guides(category='game')
-    if not guides:
-        await callback.answer("📭 Гайды пока не добавлены", show_alert=True)
-        return
-    text = "📚 <b>Доступные гайды</b>\n\n"
-    for i, guide in enumerate(guides[:10], 1):
-        emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] == 'video' else '📄'
-        text += f"{i}. {emoji} <b>{guide['title']}</b>\n"
-        text += f"   {guide['description'][:100]}{'...' if len(guide['description']) > 100 else ''}\n"
-        text += f"   👁️ Просмотров: {guide['views']}\n\n"
-    if len(guides) > 10:
-        text += f"... и ещё {len(guides) - 10} гайдов\n"
-    await callback.message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="🔙 Назад", callback_data="cat_game")]]), parse_mode="HTML")
-    await callback.answer()
-
+# ================= ПОЛЬЗОВАТЕЛЬ: ПРОСМОТР ГАЙДОВ =================
 
 @dp.callback_query(F.data.startswith("user_guide_view_"))
 async def user_view_guide(callback: CallbackQuery):
-    """Показать конкретный гайд пользователю"""
+    """Показать гайд (универсально для пользователей и админов)"""
     try:
         guide_id = int(callback.data.split("_")[-1])
     except (IndexError, ValueError):
         await callback.answer("❌ Гайд не найден", show_alert=True)
         return
+
     guide = await guides_db.get_guide(guide_id)
     if not guide:
         await callback.answer("❌ Гайд не найден", show_alert=True)
         return
+
     await guides_db.increment_guide_views(guide_id)
+    media_list = await guides_db.get_guide_media(guide_id)
     text = f"📚 <b>{guide['title']}</b>\n\n{guide['description']}"
+
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔙 К категориям", callback_data="guides_menu_back")],
+        [types.InlineKeyboardButton(text="🔙 К списку (админ)", callback_data="admin_guide_list")]
+    ])
+
     try:
-        if guide['media_type'] == 'photo' and guide['media_file_id']:
-            await callback.message.answer_photo(photo=guide['media_file_id'], caption=text, reply_markup=create_guides_keyboard(), parse_mode="HTML")
-        elif guide['media_type'] == 'video' and guide['media_file_id']:
-            await callback.message.answer_video(video=guide['media_file_id'], caption=text, reply_markup=create_guides_keyboard(), parse_mode="HTML")
+        if not media_list:
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
         else:
-            await callback.message.answer(text, reply_markup=create_guides_keyboard(), parse_mode="HTML")
+            from aiogram.types import InputMediaPhoto, InputMediaVideo, InputMediaAudio, InputMediaDocument
+
+            grouped = {'photo': [], 'video': [], 'audio': [], 'document': [], 'animation': []}
+            for m in media_list[:10]:
+                mt = m['file_type']
+                if mt == 'animation':
+                    grouped['document'].append(m)
+                elif mt.startswith('document'):
+                    grouped['document'].append(m)
+                elif mt in grouped:
+                    grouped[mt].append(m)
+
+            chat_id = callback.message.chat.id
+            caption_added = False
+            last_message = None
+
+            for media_type, items in grouped.items():
+                if not items:
+                    continue
+                media_group = []
+                for i, item in enumerate(items):
+                    mf = item['file_id']
+                    caption = text if not caption_added else None
+                    if not caption_added and i == 0:
+                        caption_added = True
+                    if media_type == 'photo':
+                        media_group.append(InputMediaPhoto(media=mf, caption=caption, parse_mode="HTML"))
+                    elif media_type == 'video':
+                        media_group.append(InputMediaVideo(media=mf, caption=caption, parse_mode="HTML"))
+                    elif media_type == 'audio':
+                        media_group.append(InputMediaAudio(media=mf, caption=caption, parse_mode="HTML"))
+                    elif media_type == 'document':
+                        media_group.append(InputMediaDocument(media=mf, caption=caption, parse_mode="HTML"))
+                if media_group:
+                    sent = await bot.send_media_group(chat_id=chat_id, media=media_group)
+                    if sent:
+                        last_message = sent[-1]
+            if not last_message:
+                last_message = await callback.message.answer(text, parse_mode="HTML")
+            await last_message.reply("Выберите действие:", reply_markup=keyboard, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Ошибка отправки гайда: {e}")
-        await callback.message.answer(text, reply_markup=create_guides_keyboard(), parse_mode="HTML")
+        await callback.message.answer(f"{text}\n\n⚠️ <i>Не удалось загрузить медиа</i>", reply_markup=keyboard, parse_mode="HTML")
+
     await callback.message.delete()
     await callback.answer()
 
@@ -548,59 +562,166 @@ async def admin_guide_add_category_received(message: Message, state: FSMContext)
         await message.answer("❌ Неверная категория. Напишите: game, learn или tech")
         return
     await state.update_data(category=category)
-    await state.set_state(QueryMode.admin_guide_add_media)
-    await message.answer("4️⃣ Добавьте <b>медиа</b> (опционально):\n\n• Отправьте фото или видео для гайда\n• Или напишите /skip чтобы пропустить\n• Или /cancel для отмены")
+    await state.set_state(QueryMode.admin_guide_select_media)
+
+    media = await guides_db.get_media_from_library(limit=20)
+    text = "4️⃣ <b>Выберите медиа для гайда</b>\n\n"
+
+    if not media:
+        text += "📭 <b>Библиотека пуста!</b>\n\nСначала загрузите файлы в медиа-библиотеку:\n1. Нажмите 🔙 Назад\n2. Выберите 📚 Медиа-библиотека\n3. Загрузите файлы\n\nИли напишите /skip чтобы продолжить без медиа"
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="⏭️ Пропустить", callback_data="guide_media_skip")],
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_guide_add")]
+        ])
+    else:
+        text += "📁 <b>Доступные файлы:</b>\n\n"
+        for i, m in enumerate(media[:10], 1):
+            emoji = '📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'
+            text += f"{i}. {emoji} <code>{m['file_name'] or 'Без имени'}</code> ({m['file_type']})\n"
+        if len(media) > 10:
+            text += f"... и ещё {len(media) - 10} файлов\n"
+        text += "\n<b>Выберите файлы:</b>\n• Отправьте номера файлов через запятую (например: 1,3,5)\n• Или напишите /skip чтобы пропустить\n• Или /cancel для отмены"
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="📤 Загрузить новые файлы", callback_data="admin_media_upload_start")],
+            [types.InlineKeyboardButton(text="⏭️ Пропустить", callback_data="guide_media_skip")]
+        ])
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
 
-@dp.message(QueryMode.admin_guide_add_media, F.photo)
-async def admin_guide_add_photo(message: Message, state: FSMContext):
-    """Получение фото для гайда"""
-    await save_guide_with_media(message, state, 'photo', message.photo[-1].file_id)
+@dp.message(QueryMode.admin_guide_select_media)
+async def admin_guide_select_media_from_library(message: Message, state: FSMContext):
+    """Выбор медиа из библиотеки по номерам"""
+    if not check_admin_session(message.from_user.id):
+        return
+    text = message.text.strip()
+    if text.lower() == '/skip':
+        await _save_guide_with_selected_media(message, state, [])
+        return
+    try:
+        numbers = [int(n.strip()) for n in text.replace(',', ' ').split() if n.strip().isdigit()]
+    except ValueError:
+        await message.answer("❌ <b>Неверный формат</b>\n\nОтправьте номера файлов через запятую (например: 1,3,5)\nИли напишите /skip чтобы пропустить", parse_mode="HTML")
+        return
+    if not numbers:
+        await message.answer("❌ <b>Не выбрано ни одного файла</b>\n\nОтправьте номера файлов или напишите /skip", parse_mode="HTML")
+        return
+
+    media = await guides_db.get_media_from_library(limit=20)
+    selected_media = [media[num - 1] for num in numbers if 1 <= num <= len(media)]
+    if not selected_media:
+        await message.answer("❌ <b>Файлы не найдены</b>\n\nПроверьте номера и попробуйте снова", parse_mode="HTML")
+        return
+
+    await state.update_data(selected_media=selected_media)
+    await state.set_state(QueryMode.admin_guide_media_confirm)
+    confirm_text = "✅ <b>Выбрано файлов:</b>\n\n" + "\n".join(f"{i}. {'📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'} {m['file_name'] or 'Без имени'}" for i, m in enumerate(selected_media, 1))
+    confirm_text += "\n<b>Подтвердите создание гайда:</b>"
+    await message.answer(confirm_text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✅ Создать гайд", callback_data="guide_media_confirm_create")],
+        [types.InlineKeyboardButton(text="🔄 Выбрать другие", callback_data="admin_guide_add")],
+        [types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back")]
+    ]), parse_mode="HTML")
 
 
-@dp.message(QueryMode.admin_guide_add_media, F.video)
-async def admin_guide_add_video(message: Message, state: FSMContext):
-    """Получение видео для гайда"""
-    await save_guide_with_media(message, state, 'video', message.video.file_id)
-
-
-@dp.message(QueryMode.admin_guide_add_media, Command("skip"))
-async def admin_guide_skip_media(message: Message, state: FSMContext):
-    """Пропустить добавление медиа"""
-    await save_guide_with_media(message, state, None, None)
-
-
-async def save_guide_with_media(message: Message, state: FSMContext, media_type: str, media_file_id: str):
-    """Сохранение гайда в БД"""
+async def _save_guide_with_selected_media(message: Message, state: FSMContext, selected_media: list):
+    """Внутренняя функция сохранения гайда"""
     data = await state.get_data()
-    guide_id = await guides_db.add_guide(title=data.get('title'), description=data.get('description'), category=data.get('category'), media_type=media_type, media_file_id=media_file_id, admin_id=data.get('admin_id'))
+    guide_id = await guides_db.add_guide(
+        title=data.get('title'), description=data.get('description'), category=data.get('category'),
+        media_type='multiple' if len(selected_media) > 1 else (selected_media[0]['file_type'] if selected_media else None),
+        media_file_id=','.join([m['file_id'] for m in selected_media]) if selected_media else None,
+        admin_id=data.get('admin_id')
+    )
+    for media_item in selected_media:
+        await guides_db.link_media_to_guide(guide_id, media_item['id'])
+        await guides_db._connection.execute("UPDATE media_library SET usage_count = usage_count + 1 WHERE id = ?", (media_item['id'],))
+    await guides_db._connection.commit()
     await state.clear()
-    await message.answer(f"✅ <b>Гайд добавлен!</b>\n\n📋 ID: {guide_id}\n📝 Заголовок: {data.get('title')}\n📁 Категория: {data.get('category')}\n📷 Медиа: {media_type or 'нет'}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
+    await message.answer(f"✅ <b>Гайд добавлен!</b>\n\n📋 ID: {guide_id}\n📝 Заголовок: {data.get('title')}\n📁 Категория: {data.get('category')}\n📎 Файлов: {len(selected_media)}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "guide_media_confirm_create")
+async def admin_guide_confirm_create(callback: CallbackQuery, state: FSMContext):
+    """Создание гайда с выбранными медиа"""
+    if not check_admin_session(callback.from_user.id):
+        await callback.answer("🔐 /admin", show_alert=True)
+        return
+    data = await state.get_data()
+    selected_media = data.get('selected_media', [])
+    await _save_guide_with_selected_media(callback.message, state, selected_media)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "guide_media_skip")
+async def admin_guide_media_skip(callback: CallbackQuery, state: FSMContext):
+    """Пропустить добавление медиа"""
+    if not check_admin_session(callback.from_user.id):
+        await callback.answer("🔐 /admin", show_alert=True)
+        return
+    data = await state.get_data()
+    guide_id = await guides_db.add_guide(
+        title=data.get('title'), description=data.get('description'), category=data.get('category'),
+        media_type=None, media_file_id=None, admin_id=data.get('admin_id')
+    )
+    await state.clear()
+    await callback.message.edit_text(f"✅ <b>Гайд создан без медиа!</b>\n\n📋 ID: {guide_id}\n📝 Заголовок: {data.get('title')}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
+    await callback.answer()
 
 
 @dp.callback_query(F.data == "admin_guide_list")
 async def admin_show_guides_list(callback: CallbackQuery):
-    """Показать список гайдов админу"""
+    """Показать список гайдов админу с кнопками удаления"""
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 /admin", show_alert=True)
         return
+
     guides = await guides_db.get_guides()
+
     if not guides:
-        text = "📭 <b>Гайды не найдены</b>\n\nДобавьте первый гайд через кнопку «➕ Добавить гайд»"
-    else:
-        text = f"📋 <b>Список гайдов</b> ({len(guides)})\n\n"
-        for i, guide in enumerate(guides[:15], 1):
-            emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] == 'video' else '📄'
-            text += f"{i}. {emoji} <code>{guide['title']}</code>\n"
-            text += f"   Категория: {guide['category']} | 👁️ {guide['views']}\n"
-            text += f"   ID: <code>{guide['id']}</code>\n\n"
-        if len(guides) > 15:
-            text += f"... и ещё {len(guides) - 15}\n"
-    await callback.message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="➕ Добавить", callback_data="admin_guide_add")], [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]]), parse_mode="HTML")
+        text = "📭 <b>Гайды не найдены</b>\n\n"
+        text += "Добавьте первый гайд через кнопку «➕ Добавить гайд»"
+        await callback.message.edit_text(
+            text,
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                [types.InlineKeyboardButton(text="➕ Добавить", callback_data="admin_guide_add")],
+                [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")]
+            ]),
+            parse_mode="HTML"
+        )
+        await callback.answer()
+        return
+
+    text = f"📋 <b>Список гайдов</b> ({len(guides)})\n\n"
+    inline_keyboard = []
+
+    for i, guide in enumerate(guides[:15], 1):
+        media_count = len(await guides_db.get_guide_media(guide['id']))
+        emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] in ['video', 'animation'] else '📎' if guide['media_type'] else '📄'
+        text += f"{i}. {emoji} <code>{guide['title']}</code>\n"
+        text += f"   Категория: {guide['category']} | 👁️ {guide['views']} | 📎 {media_count} файл(ов)\n"
+        text += f"   ID: <code>{guide['id']}</code>\n\n"
+        # 🔧 ИСПРАВЛЕНО: используем "confirm" префикс для кнопки удаления в списке
+        inline_keyboard.append([
+            types.InlineKeyboardButton(text="📖 Открыть", callback_data=f"user_guide_view_{guide['id']}"),
+            types.InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"admin_guide_delete_confirm_{guide['id']}")
+        ])
+
+    if len(guides) > 15:
+        text += f"... и ещё {len(guides) - 15}\n"
+
+    inline_keyboard.append([types.InlineKeyboardButton(text="➕ Добавить новый", callback_data="admin_guide_add")])
+    inline_keyboard.append([types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_back")])
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=inline_keyboard),
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("admin_guide_delete_"))
+# 🔧 ИСПРАВЛЕНО: префикс "confirm" для окна подтверждения
+@dp.callback_query(F.data.startswith("admin_guide_delete_confirm_"))
 async def admin_guide_delete_confirm(callback: CallbackQuery):
     """Подтверждение удаления гайда"""
     if not check_admin_session(callback.from_user.id):
@@ -615,27 +736,83 @@ async def admin_guide_delete_confirm(callback: CallbackQuery):
     if not guide:
         await callback.answer("❌ Гайд не найден", show_alert=True)
         return
-    await callback.message.edit_text(f"🗑️ <b>Удалить гайд?</b>\n\n📝 {guide['title']}\n👁️ Просмотров: {guide['views']}\n\nЭто действие нельзя отменить!", reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[[types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_guide_delete_yes_{guide_id}"), types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_guide_list")]]), parse_mode="HTML")
+
+    confirm_text = (
+        f"🗑️ <b>Удалить гайд?</b>\n\n"
+        f"📝 {guide['title']}\n"
+        f"👁️ Просмотров: {guide['views']}\n"
+        f"⏰ {datetime.now().strftime('%H:%M:%S')}\n\n"
+        f"Это действие нельзя отменить!"
+    )
+
+    try:
+        await callback.message.edit_text(
+            confirm_text,
+            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+                # 🔧 ИСПРАВЛЕНО: используем "execute" префикс для кнопки подтверждения
+                [types.InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_guide_delete_execute_{guide_id}"),
+                 types.InlineKeyboardButton(text="❌ Отмена", callback_data="admin_guide_list")]
+            ]),
+            parse_mode="HTML"
+        )
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await callback.answer("✅ Подтвердите удаление", show_alert=False)
+        else:
+            raise
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("admin_guide_delete_yes_"))
+# 🔧 ИСПРАВЛЕНО: префикс "execute" для фактического удаления
+@dp.callback_query(F.data.startswith("admin_guide_delete_execute_"))
 async def admin_guide_delete_execute(callback: CallbackQuery):
-    """Удаление гайда"""
+    """Удаление гайда — ВЕРСИЯ С ОТЛАДКОЙ"""
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 /admin", show_alert=True)
         return
+
     try:
         guide_id = int(callback.data.split("_")[-1])
-    except (IndexError, ValueError):
-        await callback.answer("❌ Ошибка", show_alert=True)
-        return
-    success = await guides_db.delete_guide(guide_id, callback.from_user.id)
-    if success:
-        await callback.message.edit_text("✅ <b>Гайд удалён</b>", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
-        await db.log_action(callback.from_user.id, "admin_guide_deleted", str(guide_id))
-    else:
-        await callback.answer("❌ Не удалось удалить", show_alert=True)
+        print(f"🗑️ DEBUG: Попытка удаления гайда ID={guide_id}")
+
+        guide = await guides_db.get_guide(guide_id)
+        if not guide:
+            print(f"❌ DEBUG: Гайд {guide_id} не найден")
+            await callback.message.edit_text(f"❌ <b>Гайд не найден!</b>\n\nID: {guide_id}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
+            await callback.answer()
+            return
+
+        print(f"✅ DEBUG: Гайд найден: {guide['title']}")
+        media_list = await guides_db.get_guide_media(guide_id)
+        print(f"📎 DEBUG: Найдено {len(media_list)} связанных файлов")
+
+        # Удаляем связи с медиа
+        await guides_db._connection.execute("DELETE FROM guide_media WHERE guide_id = ?", (guide_id,))
+        await guides_db._connection.commit()
+        print("🗑️ DEBUG: Связи с медиа удалены")
+
+        # Удаляем сам гайд
+        cursor = await guides_db._connection.execute("DELETE FROM guides WHERE id = ?", (guide_id,))
+        await guides_db._connection.commit()
+        print(f"🗑️ DEBUG: Удалено строк: {cursor.rowcount}")
+
+        if cursor.rowcount > 0:
+            print(f"✅ DEBUG: Гайд {guide_id} успешно удалён!")
+            await callback.message.edit_text(
+                "✅ <b>Гайд удалён!</b>\n\n"
+                f"🗑️ ID: {guide_id}\n"
+                f"📝 Название: {guide['title']}\n"
+                f"📎 Очищено файлов: {len(media_list)}",
+                reply_markup=create_admin_guides_keyboard(),
+                parse_mode="HTML"
+            )
+            await db.log_action(callback.from_user.id, "admin_guide_deleted", str(guide_id))
+        else:
+            print(f"❌ DEBUG: Не удалось удалить (rowcount=0)")
+            await callback.message.edit_text(f"❌ <b>Не удалось удалить!</b>\n\nID: {guide_id}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
+    except Exception as e:
+        print(f"❌ DEBUG ОШИБКА: {type(e).__name__}: {e}")
+        await callback.message.edit_text(f"❌ <b>Ошибка!</b>\n\n{type(e).__name__}: {e}", reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
     await callback.answer()
 
 
@@ -649,6 +826,102 @@ async def admin_show_guides_stats(callback: CallbackQuery):
     text = f"📊 <b>Статистика гайдов</b>\n\n📚 Всего гайдов: {stats['total'] or 0}\n👁️ Всего просмотров: {stats['total_views'] or 0}\n📷 С фото: {stats['with_photo'] or 0}\n🎬 С видео: {stats['with_video'] or 0}\n📄 Только текст: {(stats['total'] or 0) - (stats['with_photo'] or 0) - (stats['with_video'] or 0)}"
     await callback.message.edit_text(text, reply_markup=create_admin_guides_keyboard(), parse_mode="HTML")
     await callback.answer()
+
+
+# ================= КОМАНДА ОБНОВЛЕНИЯ МЕНЮ =================
+
+@dp.message(Command("refresh"))
+async def cmd_refresh(message: Message):
+    """Команда для обновления клавиатуры"""
+    user_id = message.from_user.id
+    user_data = await db.get_user(user_id)
+    email = user_data.get('email') if user_data else None
+    if not email:
+        await message.answer("⚠️ <b>Сначала привяжите почту!</b>\n\nОтправьте в чат email, который вы указывали при регистрации.", parse_mode="HTML")
+        return
+    await message.answer("✅ <b>Меню обновлено!</b>\n\nИспользуйте кнопки ниже 👇", reply_markup=create_main_keyboard(user_id), parse_mode="HTML")
+    await db.log_action(user_id, "menu_refreshed", "User refreshed menu")
+
+
+@dp.callback_query(F.data == "refresh_menu")
+async def refresh_menu_callback(callback: CallbackQuery):
+    """Кнопка '🔄 Обновить меню' в обратном совместимом интерфейсе"""
+    user_id = callback.from_user.id
+    user_data = await db.get_user(user_id)
+    email = user_data.get('email') if user_data else None
+    if not email:
+        await callback.answer("⚠️ Сначала привяжите почту!", show_alert=True)
+        return
+    await callback.message.edit_text("✅ <b>Меню обновлено!</b>\n\nИспользуйте новые кнопки ниже 👇", reply_markup=create_main_keyboard(user_id), parse_mode="HTML")
+    await callback.answer()
+
+
+# ================= АДМИН: МЕДИА-БИБЛИОТЕКА =================
+
+@dp.callback_query(F.data == "admin_media_library")
+async def admin_media_library_menu(callback: CallbackQuery):
+    """Меню медиа-библиотеки"""
+    if not check_admin_session(callback.from_user.id):
+        await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
+        return
+    media = await guides_db.get_media_from_library(limit=20)
+    text = "📚 <b>Медиа-библиотека</b>\n\n"
+    if not media:
+        text += "📭 Библиотека пуста\n\nОтправьте файлы для добавления в библиотеку."
+    else:
+        text += f"📁 Всего файлов: {len(media)}\n\n"
+        for i, m in enumerate(media[:10], 1):
+            emoji = '📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'
+            text += f"{i}. {emoji} {m['file_name'] or 'Без имени'} ({m['file_type']})\n"
+            text += f"   👁️ Использований: {m['usage_count']}\n\n"
+        if len(media) > 10:
+            text += f"... и ещё {len(media) - 10} файлов\n"
+    await callback.message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="📤 Загрузить файлы", callback_data="admin_media_upload_start")],
+        [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_guides")]
+    ]), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "admin_media_upload_start")
+async def admin_media_upload_start(callback: CallbackQuery, state: FSMContext):
+    """Начать загрузку файлов"""
+    if not check_admin_session(callback.from_user.id):
+        await callback.answer("🔐 /admin", show_alert=True)
+        return
+    await state.set_state(QueryMode.admin_media_upload)
+    await callback.message.edit_text("📤 <b>Загрузка файлов в библиотеку</b>\n\nОтправьте файлы (можно несколько сразу):\n• 📷 Фото\n• 🎬 Видео\n• 🎵 Аудио\n• 📄 Документы\n\nНапишите /done когда закончите\nИли /cancel для отмены", reply_markup=None, parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.message(QueryMode.admin_media_upload, F.photo | F.video | F.document | F.audio | F.animation)
+async def admin_media_upload_file(message: Message, state: FSMContext):
+    """Загрузка файла в библиотеку"""
+    if not check_admin_session(message.from_user.id):
+        return
+    if message.photo:
+        file_id, file_type, file_name, file_size = message.photo[-1].file_id, 'photo', f"photo_{len(message.photo)}.jpg", message.photo[-1].file_size
+    elif message.video:
+        file_id, file_type, file_name, file_size = message.video.file_id, 'video', message.video.file_name or "video.mp4", message.video.file_size
+    elif message.document:
+        file_id, file_type, file_name, file_size = message.document.file_id, 'document', message.document.file_name or "document", message.document.file_size
+    elif message.audio:
+        file_id, file_type, file_name, file_size = message.audio.file_id, 'audio', message.audio.file_name or "audio.mp3", message.audio.file_size
+    elif message.animation:
+        file_id, file_type, file_name, file_size = message.animation.file_id, 'animation', message.animation.file_name or "animation.gif", message.animation.file_size
+    else:
+        return
+    media_id = await guides_db.add_media_to_library(file_id=file_id, file_type=file_type, file_name=file_name, file_size=file_size, admin_id=message.from_user.id)
+    await message.answer(f"✅ Файл <code>{file_name}</code> добавлен в библиотеку (ID: {media_id})", parse_mode="HTML")
+
+
+@dp.message(QueryMode.admin_media_upload, Command("done"))
+async def admin_media_upload_done(message: Message, state: FSMContext):
+    """Завершение загрузки"""
+    if not check_admin_session(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer("✅ Загрузка завершена!\n\nФайлы доступны в медиа-библиотеке.", reply_markup=create_admin_guides_keyboard())
 
 
 # ================= АДМИН: ВХОД ПО ПАРОЛЮ =================
@@ -665,17 +938,11 @@ async def cmd_admin(message: Message, state: FSMContext):
             await message.answer("⚠️ <b>Админ-панель не настроена</b>\n\nПароль не задан в конфигурации.\nОбратитесь к разработчику.", parse_mode="HTML")
             logging.info(f"✅ Предупреждение отправлено пользователю {user_id}")
             return
-        logging.info(f"✅ ADMIN_PASSWORD задан, проверяем сессию для {user_id}")
         if check_admin_session(user_id):
-            logging.info(f"✅ Сессия активна для {user_id}, показываем панель")
             await message.answer("⚙️ <b>Админ-панель</b>", reply_markup=create_admin_keyboard(), parse_mode="HTML")
-            logging.info(f"✅ Панель отправлена пользователю {user_id}")
             return
-        logging.info(f"🔐 Запрашиваем пароль у пользователя {user_id}")
         await state.set_state(QueryMode.admin_waiting_password)
-        logging.info(f"🔐 Состояние установлено: {await state.get_state()}")
         await message.answer("🔐 <b>Введите пароль администратора</b>\n\nДля отмены: /cancel", parse_mode="HTML")
-        logging.info(f"✅ Запрос пароля отправлен пользователю {user_id}")
     except Exception as e:
         logging.error(f"❌ ОШИБКА в cmd_admin для пользователя {user_id}: {type(e).__name__}: {e}", exc_info=True)
         await message.answer("❌ Произошла ошибка при входе в админ-панель. Попробуйте позже.", parse_mode="HTML")
@@ -684,8 +951,7 @@ async def cmd_admin(message: Message, state: FSMContext):
 @dp.message(QueryMode.admin_waiting_password)
 async def admin_check_password(message: Message, state: FSMContext):
     """Проверка пароля админа"""
-    user_id = message.from_user.id
-    user_password = message.text.strip()
+    user_id, user_password = message.from_user.id, message.text.strip()
     now = time.time()
     if user_id in failed_login_attempts:
         failed_login_attempts[user_id] = [t for t in failed_login_attempts[user_id] if now - t < LOCKOUT_DURATION]
@@ -738,7 +1004,7 @@ async def cmd_myid(message: Message):
     await message.answer(f"Ваш ID: <code>{message.from_user.id}</code>\nUsername: @{message.from_user.username}", parse_mode="HTML")
 
 
-# ================= АДМИН: СТАТИСТИКА =================
+# ================= АДМИН: СТАТИСТИКА / РАССЫЛКА / ПОЛЬЗОВАТЕЛИ / АКТИВНОСТЬ / ПОИСК =================
 
 @dp.callback_query(F.data == "admin_stats")
 async def admin_show_stats(callback: CallbackQuery):
@@ -751,8 +1017,6 @@ async def admin_show_stats(callback: CallbackQuery):
     await callback.message.edit_text(text, reply_markup=create_admin_keyboard(), parse_mode="HTML")
     await callback.answer()
 
-
-# ================= АДМИН: РАССЫЛКА =================
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast_start(callback: CallbackQuery, state: FSMContext):
@@ -771,8 +1035,7 @@ async def admin_broadcast_receive_text(message: Message, state: FSMContext):
     if not check_admin_session(message.from_user.id):
         await message.answer("🔐 Сессия истекла. Введите /admin")
         return
-    text = message.text
-    await state.update_data(broadcast_text=text, admin_id=message.from_user.id)
+    await state.update_data(broadcast_text=message.text, admin_id=message.from_user.id)
     await message.answer("📎 Теперь отправьте медиа (фото/видео) или напишите /send для отправки только текста", reply_markup=types.ForceReply())
     await state.set_state(QueryMode.admin_broadcast_media)
 
@@ -782,12 +1045,11 @@ async def admin_broadcast_receive_photo(message: Message, state: FSMContext):
     """Получение фото для рассылки"""
     if not check_admin_session(message.from_user.id):
         return
-    file_id = message.photo[-1].file_id
     data = await state.get_data()
-    broadcast_id = await db.add_broadcast(admin_id=data.get('admin_id'), message_text=data.get('broadcast_text'), media_type='photo', media_file_id=file_id)
+    broadcast_id = await db.add_broadcast(admin_id=data.get('admin_id'), message_text=data.get('broadcast_text'), media_type='photo', media_file_id=message.photo[-1].file_id)
     await state.clear()
     await message.answer(f"✅ Рассылка создана (ID: {broadcast_id})\nНачинаю отправку...")
-    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'photo', file_id, data.get('admin_id'))
+    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'photo', message.photo[-1].file_id, data.get('admin_id'))
 
 
 @dp.message(QueryMode.admin_broadcast_media, F.video)
@@ -795,12 +1057,11 @@ async def admin_broadcast_receive_video(message: Message, state: FSMContext):
     """Получение видео для рассылки"""
     if not check_admin_session(message.from_user.id):
         return
-    file_id = message.video.file_id
     data = await state.get_data()
-    broadcast_id = await db.add_broadcast(admin_id=data.get('admin_id'), message_text=data.get('broadcast_text'), media_type='video', media_file_id=file_id)
+    broadcast_id = await db.add_broadcast(admin_id=data.get('admin_id'), message_text=data.get('broadcast_text'), media_type='video', media_file_id=message.video.file_id)
     await state.clear()
     await message.answer(f"✅ Рассылка создана (ID: {broadcast_id})\nНачинаю отправку...")
-    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'video', file_id, data.get('admin_id'))
+    await send_broadcast(broadcast_id, data.get('broadcast_text'), 'video', message.video.file_id, data.get('admin_id'))
 
 
 @dp.message(QueryMode.admin_broadcast_media, Command("send"))
@@ -809,11 +1070,10 @@ async def admin_broadcast_send_text_only(message: Message, state: FSMContext):
     if not check_admin_session(message.from_user.id):
         return
     data = await state.get_data()
-    text = data.get('broadcast_text')
-    broadcast_id = await db.add_broadcast(admin_id=data.get('admin_id'), message_text=text, media_type=None, media_file_id=None)
+    broadcast_id = await db.add_broadcast(admin_id=data.get('admin_id'), message_text=data.get('broadcast_text'), media_type=None, media_file_id=None)
     await state.clear()
     await message.answer(f"✅ Текстовая рассылка создана (ID: {broadcast_id})\nНачинаю отправку...")
-    await send_broadcast(broadcast_id, text, None, None, data.get('admin_id'))
+    await send_broadcast(broadcast_id, data.get('broadcast_text'), None, None, data.get('admin_id'))
 
 
 async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_file_id: str, admin_id: int = None):
@@ -865,8 +1125,6 @@ async def send_broadcast(broadcast_id: int, text: str, media_type: str, media_fi
     logging.info(f"✅ РАССЫЛКА ЗАВЕРШЕНА: {sent}/{len(users)}")
 
 
-# ================= АДМИН: ПОЛЬЗОВАТЕЛИ (ПОСТРАНИЧНО) =================
-
 @dp.callback_query(F.data == "admin_users")
 async def admin_show_users(callback: CallbackQuery):
     """Список пользователей (страница 1)"""
@@ -913,8 +1171,6 @@ async def handle_users_pagination(callback: CallbackQuery):
     await callback.answer()
 
 
-# ================= АДМИН: АКТИВНОСТЬ =================
-
 @dp.callback_query(F.data == "admin_activity")
 async def admin_show_activity(callback: CallbackQuery):
     """Топ активных пользователей"""
@@ -940,22 +1196,14 @@ async def admin_back(callback: CallbackQuery, state: FSMContext):
     if not check_admin_session(callback.from_user.id):
         await callback.answer("🔐 Сессия истекла. Введите /admin", show_alert=True)
         return
-
     await state.clear()
-
     try:
-        await callback.message.edit_text(
-            "⚙️ <b>Админ-панель</b>",
-            reply_markup=create_admin_keyboard(),
-            parse_mode="HTML"
-        )
+        await callback.message.edit_text("⚙️ <b>Админ-панель</b>", reply_markup=create_admin_keyboard(), parse_mode="HTML")
     except TelegramBadRequest as e:
-        # Если сообщение не изменилось — просто отвечаем на callback
         if "message is not modified" in str(e):
             await callback.answer("✅ В админ-панели", show_alert=False)
         else:
-            raise  # Другие ошибки пробрасываем дальше
-
+            raise
     await callback.answer()
 
 
@@ -970,8 +1218,6 @@ async def admin_logout_callback(callback: CallbackQuery):
     await callback.message.answer("🔓 <b>Вы вышли из админ-панели</b>", reply_markup=create_main_keyboard(callback.from_user.id), parse_mode="HTML")
     await callback.answer("✅ Вы вышли")
 
-
-# ================= АДМИН: ПОИСК ПО EMAIL =================
 
 @dp.callback_query(F.data == "admin_search_email")
 async def admin_search_email_start(callback: CallbackQuery, state: FSMContext):
@@ -1018,8 +1264,6 @@ async def admin_search_email_process(message: Message, state: FSMContext):
     await db.log_action(message.from_user.id, "admin_search_email", search_query)
 
 
-# ================= CALLBACK: КАТЕГОРИИ =================
-
 @dp.callback_query(F.data.startswith("cat_"))
 async def handle_category_callback(callback: CallbackQuery, state: FSMContext):
     """Выбор категории"""
@@ -1040,25 +1284,15 @@ async def handle_category_callback(callback: CallbackQuery, state: FSMContext):
 @dp.errors()
 async def errors_handler(update: ErrorEvent, exception: Exception) -> bool:
     """Обработчик ошибок для aiogram 3.x"""
-
-    # Игнорируем устаревшие callback
     if isinstance(exception, TelegramBadRequest) and "query is too old" in str(exception):
         return True
-
-    # Игнорируем заблокированных пользователей
     if isinstance(exception, TelegramForbiddenError):
         return True
-
-    # Игнорируем таймауты сети
     if isinstance(exception, TelegramNetworkError):
         logging.warning(f"⚠️ Сетевая ошибка: {exception}")
         return True
-
-    # Игнорируем "сообщение не изменено"
     if isinstance(exception, TelegramBadRequest) and "message is not modified" in str(exception):
         return True
-
-    # Логируем остальные
     logging.error(f"Error: {type(exception).__name__}: {exception}")
     return True
 
