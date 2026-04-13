@@ -54,6 +54,18 @@ class GuidesDatabase:
 
     # ================= КРАУД ОПЕРАЦИИ =================
 
+    async def get_media_by_id(self, media_id: int) -> Optional[dict]:
+        """Получить полный материал по ID (включая file_id для отправки)"""
+        cursor = await self._connection.execute(
+            """SELECT id, file_id, file_type, file_name, file_size,
+                      uploaded_at, admin_id, usage_count
+               FROM media_library
+               WHERE id = ?""",
+            (media_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def add_guide(self, title: str, description: str, category: str,
                        media_type: Optional[str], media_file_id: Optional[str],
                        admin_id: int) -> int:

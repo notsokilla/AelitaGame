@@ -152,9 +152,10 @@ async def call_neural_api(prompt_type: str, user_query: str) -> str:
 def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
     """Главное меню с кнопкой гайдов"""
     keyboard = [
-        [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
-        [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
-        [types.KeyboardButton(text="📚 Гайды"), types.KeyboardButton(text="📰 Новости")],
+         [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
+         [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
+         [types.KeyboardButton(text="📚 Гайды"), types.KeyboardButton(text="📎 Материалы")],
+         [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
     ]
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
     return types.ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -249,6 +250,243 @@ def create_media_page_keyboard(current_page: int, total_pages: int, base_callbac
         row.append(types.InlineKeyboardButton(text="➡️", callback_data=f"{base_callback}_page_{current_page + 1}"))
     buttons.append(row)
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
+
+# ================= ОБРАБОТЧИКИ: МАТЕРИАЛЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =================
+
+@dp.message(F.text == "📎 Материалы")
+async def handle_user_materials(message: Message):
+    """Кнопка Материалы — показывает список файлов"""
+    await _show_user_materials_page(message, page=1)
+
+
+async def _show_user_materials_page(target, page: int):
+    """Показывает страницу материалов (универсально для Message/CallbackQuery)"""
+    # Получаем ВСЕ медиа из библиотеки (включая file_id!)
+    media = await guides_db.get_media_from_library(limit=500)
+    total_media = len(media)
+    total_pages = (total_media + MEDIA_PER_PAGE - 1) // MEDIA_PER_PAGE
+
+    # Корректируем страницу
+    if page < 1:
+        page = 1
+    if page > total_pages and total_pages > 0:
+        page = total_pages
+
+    start_idx = (page - 1) * MEDIA_PER_PAGE
+    end_idx = start_idx + MEDIA_PER_PAGE
+    page_media = media[start_idx:end_idx]
+
+    # Формируем текст
+    text = "📎 <b>Библиотека материалов</b>\n\n"
+
+    if not page_media:
+        text += "📭 Пока нет загруженных материалов.\n\n"
+        text += "Загляните позже — мы регулярно добавляем новый контент! 💙"
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="🔙 Назад", callback_data="ignore")]
+        ])
+    else:
+        text += f"📁 Всего файлов: {total_media} (стр. {page}/{total_pages})\n\n"
+        text += "<b>Как использовать:</b>\n"
+        text += "• Нажмите на ID файла чтобы открыть его\n"
+        text += "• Или напишите в чат: <code>/material ID</code>\n\n"
+
+        for i, m in enumerate(page_media, start_idx + 1):
+            emoji = '📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '🎵' if m['file_type'] == 'audio' else '📄'
+            # Показываем ID и имя файла
+            text += f"{i}. {emoji} <code>ID:{m['id']}</code> — {m['file_name'] or 'Без имени'} ({m['file_type']})\n"
+            text += f"   👁️ Скачиваний: {m['usage_count']}\n\n"
+
+        if total_media > MEDIA_PER_PAGE:
+            text += f"📊 Показано {len(page_media)} из {total_media}\n"
+
+        # Создаём клавиатуру
+        keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
+
+        # Кнопки с ID файлов (до 5 в ряд)
+        id_row = []
+        for m in page_media[:5]:
+            id_row.append(types.InlineKeyboardButton(
+                text=f"{m['id']}",
+                callback_data=f"user_material_{m['id']}"
+            ))
+        if id_row:
+            keyboard.inline_keyboard.append(id_row)
+
+        # Пагинация
+        if total_pages > 1:
+            pagination_row = []
+            if page > 1:
+                pagination_row.append(types.InlineKeyboardButton(text="⬅️", callback_data=f"user_materials_page_{page - 1}"))
+            pagination_row.append(types.InlineKeyboardButton(text=f"📄 {page}/{total_pages}", callback_data="ignore"))
+            if page < total_pages:
+                pagination_row.append(types.InlineKeyboardButton(text="➡️", callback_data=f"user_materials_page_{page + 1}"))
+            keyboard.inline_keyboard.append(pagination_row)
+
+        # Кнопка быстрого поиска по ID
+        keyboard.inline_keyboard.append([
+            types.InlineKeyboardButton(text="🔍 Найти по ID", switch_inline_query_current_chat="/material ")
+        ])
+
+    # Отправляем ответ
+    if isinstance(target, Message):
+        await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
+    elif isinstance(target, CallbackQuery):
+        await target.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("user_materials_page_"))
+async def user_materials_page_callback(callback: CallbackQuery):
+    """Пагинация в списке материалов"""
+    try:
+        page = int(callback.data.split("_")[-1])
+    except (IndexError, ValueError):
+        page = 1
+
+    await _show_user_materials_page(callback, page=page)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("user_material_"))
+async def user_view_material(callback: CallbackQuery):
+    """Просмотр конкретного материала по ID"""
+    try:
+        material_id = int(callback.data.split("_")[-1])
+    except (IndexError, ValueError):
+        await callback.answer("❌ Неверный ID", show_alert=True)
+        return
+
+    # Получаем материал ПОЛНОСТЬЮ (включая file_id!)
+    material = await guides_db.get_media_by_id(material_id)
+
+    if not material:
+        await callback.answer("❌ Материал не найден", show_alert=True)
+        return
+
+    # Увеличиваем счётчик использования
+    await guides_db._connection.execute(
+        "UPDATE media_library SET usage_count = usage_count + 1 WHERE id = ?",
+        (material_id,)
+    )
+    await guides_db._connection.commit()
+
+    # Формируем описание
+    emoji = '📷' if material['file_type'] == 'photo' else '🎬' if material['file_type'] in ['video', 'animation'] else '🎵' if material['file_type'] == 'audio' else '📄'
+    caption = f"{emoji} <b>{material['file_name'] or 'Файл'}</b>\n\nID: <code>{material['id']}</code>\nТип: {material['file_type']}\n👁️ Скачиваний: {material['usage_count']}"
+
+    # Отправляем файл в зависимости от типа
+    reply_markup = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="🔙 Назад к материалам", callback_data="user_materials_back")]
+    ])
+
+    try:
+        if material['file_type'] == 'photo':
+            await callback.message.answer_photo(
+                photo=material['file_id'],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif material['file_type'] == 'video':
+            await callback.message.answer_video(
+                video=material['file_id'],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif material['file_type'] == 'audio':
+            await callback.message.answer_audio(
+                audio=material['file_id'],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        elif material['file_type'] in ['animation', 'document', 'document_pdf', 'document_doc', 'document_txt']:
+            await callback.message.answer_document(
+                document=material['file_id'],
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
+        else:
+            await callback.message.answer(
+                f"{caption}\n\n⚠️ <i>Неизвестный тип файла</i>",
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+    except Exception as e:
+        logging.error(f"Ошибка отправки материала {material_id}: {e}")
+        await callback.message.answer(
+            f"{caption}\n\n⚠️ <i>Не удалось отправить файл</i>",
+            reply_markup=reply_markup,
+            parse_mode="HTML"
+        )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "user_materials_back")
+async def user_materials_back(callback: CallbackQuery):
+    """Возврат к списку материалов"""
+    await _show_user_materials_page(callback, page=1)
+    await callback.answer()
+
+
+# ================= КОМАНДА /material ДЛЯ ПОИСКА ПО ID =================
+
+@dp.message(Command("material"))
+async def cmd_material(message: Message):
+    """Команда /material ID — открыть материал по ID"""
+    args = message.text.split()
+
+    if len(args) < 2:
+        await message.answer(
+            "🔍 <b>Поиск материала по ID</b>\n\n"
+            "Использование:\n"
+            "<code>/material 123</code> — открыть материал с ID 123\n\n"
+            "Чтобы узнать ID материалов, нажмите кнопку 📎 Материалы в меню.",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        material_id = int(args[1])
+    except ValueError:
+        await message.answer("❌ <b>Неверный ID</b>\n\nID должен быть числом.", parse_mode="HTML")
+        return
+
+    # Получаем материал ПОЛНОСТЬЮ
+    material = await guides_db.get_media_by_id(material_id)
+
+    if not material:
+        await message.answer(f"❌ <b>Материал #{material_id} не найден</b>", parse_mode="HTML")
+        return
+
+    # Увеличиваем счётчик
+    await guides_db._connection.execute(
+        "UPDATE media_library SET usage_count = usage_count + 1 WHERE id = ?",
+        (material_id,)
+    )
+    await guides_db._connection.commit()
+
+    # Отправляем файл
+    emoji = '📷' if material['file_type'] == 'photo' else '🎬' if material['file_type'] in ['video', 'animation'] else '🎵' if material['file_type'] == 'audio' else '📄'
+    caption = f"{emoji} <b>{material['file_name'] or 'Файл'}</b>\n\nID: <code>{material['id']}</code>\nТип: {material['file_type']}\n👁️ Скачиваний: {material['usage_count']}"
+
+    try:
+        if material['file_type'] == 'photo':
+            await message.answer_photo(photo=material['file_id'], caption=caption, parse_mode="HTML")
+        elif material['file_type'] == 'video':
+            await message.answer_video(video=material['file_id'], caption=caption, parse_mode="HTML")
+        elif material['file_type'] == 'audio':
+            await message.answer_audio(audio=material['file_id'], caption=caption, parse_mode="HTML")
+        elif material['file_type'] in ['animation', 'document', 'document_pdf', 'document_doc', 'document_txt']:
+            await message.answer_document(document=material['file_id'], caption=caption, parse_mode="HTML")
+        else:
+            await message.answer(f"{caption}\n\n⚠️ <i>Неизвестный тип файла</i>", parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Ошибка отправки материала {material_id}: {e}")
+        await message.answer(f"{caption}\n\n⚠️ <i>Не удалось отправить файл</i>", parse_mode="HTML")
 
 
 # ================= ОБРАБОТЧИКИ: ПОЛЬЗОВАТЕЛЬ =================
