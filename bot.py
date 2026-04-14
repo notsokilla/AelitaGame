@@ -154,7 +154,8 @@ def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
     keyboard = [
          [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
          [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
-         [types.KeyboardButton(text="📚 Гайды"), types.KeyboardButton(text="📎 Материалы")],
+         #[types.KeyboardButton(text="📚 Гайды"),
+         [types.KeyboardButton(text="📎 Материалы")],
          [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
     ]
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
