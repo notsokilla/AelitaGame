@@ -35,3 +35,6 @@ PROXY_URL = os.getenv("PROXY_URL", "")
 # ================= BOT INFO =================
 BOT_NAME = "NeuralBot"
 BOT_USERNAME = "@NeuralBotAI_bot"
+
+SUBSCRIPTION_OFFER_ID = int(os.getenv("SUBSCRIPTION_OFFER_ID", "1"))
+SUBSCRIPTION_API_URL = "https://billing.offerflow.tech/api/subscriptions/check"

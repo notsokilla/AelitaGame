@@ -26,6 +26,7 @@ from openai import AsyncOpenAI
 from config import *
 from database import Database
 from guides_db import GuidesDatabase
+from subscription_manager import SubscriptionManager, SubscriptionStatus
 
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 bot = Bot(token=BOT_TOKEN)
@@ -33,6 +34,7 @@ dp = Dispatcher()
 db = Database(DB_PATH)
 guides_db = GuidesDatabase(GUIDES_DB_PATH)
 client = AsyncOpenAI(api_key=NEURAL_API_KEY, base_url=NEURAL_BASE_URL)
+subscription_manager = SubscriptionManager(db, bot)
 
 # ================= АДМИН СЕССИИ =================
 admin_sessions: dict[int, float] = {}
@@ -96,6 +98,7 @@ class QueryMode(StatesGroup):
     admin_media_upload = State()
     admin_guide_select_media = State()
     admin_guide_media_confirm = State()
+    waiting_for_email_verification = State()
 
 
 # ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
@@ -152,11 +155,10 @@ async def call_neural_api(prompt_type: str, user_query: str) -> str:
 def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
     """Главное меню с кнопкой гайдов"""
     keyboard = [
-         [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
-         [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
-         #[types.KeyboardButton(text="📚 Гайды"),
-         [types.KeyboardButton(text="📎 Материалы")],
-         [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
+        [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
+        [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
+        [types.KeyboardButton(text="📚 Гайды"), types.KeyboardButton(text="📎 Материалы")],
+        [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
     ]
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
     return types.ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -252,6 +254,7 @@ def create_media_page_keyboard(current_page: int, total_pages: int, base_callbac
     buttons.append(row)
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
+
 # ================= ОБРАБОТЧИКИ: МАТЕРИАЛЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =================
 
 @dp.message(F.text == "📎 Материалы")
@@ -262,12 +265,10 @@ async def handle_user_materials(message: Message):
 
 async def _show_user_materials_page(target, page: int):
     """Показывает страницу материалов (универсально для Message/CallbackQuery)"""
-    # Получаем ВСЕ медиа из библиотеки (включая file_id!)
     media = await guides_db.get_media_from_library(limit=500)
     total_media = len(media)
     total_pages = (total_media + MEDIA_PER_PAGE - 1) // MEDIA_PER_PAGE
 
-    # Корректируем страницу
     if page < 1:
         page = 1
     if page > total_pages and total_pages > 0:
@@ -277,7 +278,6 @@ async def _show_user_materials_page(target, page: int):
     end_idx = start_idx + MEDIA_PER_PAGE
     page_media = media[start_idx:end_idx]
 
-    # Формируем текст
     text = "📎 <b>Библиотека материалов</b>\n\n"
 
     if not page_media:
@@ -294,17 +294,13 @@ async def _show_user_materials_page(target, page: int):
 
         for i, m in enumerate(page_media, start_idx + 1):
             emoji = '📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '🎵' if m['file_type'] == 'audio' else '📄'
-            # Показываем ID и имя файла
             text += f"{i}. {emoji} <code>ID:{m['id']}</code> — {m['file_name'] or 'Без имени'} ({m['file_type']})\n"
             text += f"   👁️ Скачиваний: {m['usage_count']}\n\n"
 
         if total_media > MEDIA_PER_PAGE:
             text += f"📊 Показано {len(page_media)} из {total_media}\n"
 
-        # Создаём клавиатуру
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[])
-
-        # Кнопки с ID файлов (до 5 в ряд)
         id_row = []
         for m in page_media[:5]:
             id_row.append(types.InlineKeyboardButton(
@@ -314,7 +310,6 @@ async def _show_user_materials_page(target, page: int):
         if id_row:
             keyboard.inline_keyboard.append(id_row)
 
-        # Пагинация
         if total_pages > 1:
             pagination_row = []
             if page > 1:
@@ -324,12 +319,10 @@ async def _show_user_materials_page(target, page: int):
                 pagination_row.append(types.InlineKeyboardButton(text="➡️", callback_data=f"user_materials_page_{page + 1}"))
             keyboard.inline_keyboard.append(pagination_row)
 
-        # Кнопка быстрого поиска по ID
         keyboard.inline_keyboard.append([
             types.InlineKeyboardButton(text="🔍 Найти по ID", switch_inline_query_current_chat="/material ")
         ])
 
-    # Отправляем ответ
     if isinstance(target, Message):
         await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
     elif isinstance(target, CallbackQuery):
@@ -343,7 +336,6 @@ async def user_materials_page_callback(callback: CallbackQuery):
         page = int(callback.data.split("_")[-1])
     except (IndexError, ValueError):
         page = 1
-
     await _show_user_materials_page(callback, page=page)
     await callback.answer()
 
@@ -357,25 +349,21 @@ async def user_view_material(callback: CallbackQuery):
         await callback.answer("❌ Неверный ID", show_alert=True)
         return
 
-    # Получаем материал ПОЛНОСТЬЮ (включая file_id!)
     material = await guides_db.get_media_by_id(material_id)
 
     if not material:
         await callback.answer("❌ Материал не найден", show_alert=True)
         return
 
-    # Увеличиваем счётчик использования
     await guides_db._connection.execute(
         "UPDATE media_library SET usage_count = usage_count + 1 WHERE id = ?",
         (material_id,)
     )
     await guides_db._connection.commit()
 
-    # Формируем описание
     emoji = '📷' if material['file_type'] == 'photo' else '🎬' if material['file_type'] in ['video', 'animation'] else '🎵' if material['file_type'] == 'audio' else '📄'
     caption = f"{emoji} <b>{material['file_name'] or 'Файл'}</b>\n\nID: <code>{material['id']}</code>\nТип: {material['file_type']}\n👁️ Скачиваний: {material['usage_count']}"
 
-    # Отправляем файл в зависимости от типа
     reply_markup = types.InlineKeyboardMarkup(inline_keyboard=[
         [types.InlineKeyboardButton(text="🔙 Назад к материалам", callback_data="user_materials_back")]
     ])
@@ -456,21 +444,18 @@ async def cmd_material(message: Message):
         await message.answer("❌ <b>Неверный ID</b>\n\nID должен быть числом.", parse_mode="HTML")
         return
 
-    # Получаем материал ПОЛНОСТЬЮ
     material = await guides_db.get_media_by_id(material_id)
 
     if not material:
         await message.answer(f"❌ <b>Материал #{material_id} не найден</b>", parse_mode="HTML")
         return
 
-    # Увеличиваем счётчик
     await guides_db._connection.execute(
         "UPDATE media_library SET usage_count = usage_count + 1 WHERE id = ?",
         (material_id,)
     )
     await guides_db._connection.commit()
 
-    # Отправляем файл
     emoji = '📷' if material['file_type'] == 'photo' else '🎬' if material['file_type'] in ['video', 'animation'] else '🎵' if material['file_type'] == 'audio' else '📄'
     caption = f"{emoji} <b>{material['file_name'] or 'Файл'}</b>\n\nID: <code>{material['id']}</code>\nТип: {material['file_type']}\n👁️ Скачиваний: {material['usage_count']}"
 
@@ -494,13 +479,100 @@ async def cmd_material(message: Message):
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """/start"""
+    """/start — начало взаимодействия с ботом"""
     user = message.from_user
+    user_id = user.id
+
     await db.add_or_update_user({
         'id': user.id, 'username': user.username,
         'first_name': user.first_name, 'last_name': user.last_name,
         'language_code': user.language_code, 'is_bot': user.is_bot
     })
+
+    is_verified = await subscription_manager.is_user_verified(user_id)
+
+    if is_verified:
+        await _send_main_menu(message, user)
+        await db.log_action(user_id, "start", "Verified user")
+        return
+
+    await state.set_state(QueryMode.waiting_for_email_verification)
+
+    welcome_text = (
+        f"🤖 <b>Привет, {user.first_name}!</b>\n\n"
+        f"Я — универсальный AI-помощник:\n"
+        f"🎮 Гайды, билды и стратегии по играм\n"
+        f"🧮 Математика с объяснением шагов\n"
+        f"🔍 Поиск и анализ информации\n"
+        f"🎓 Помощь в учёбе и объяснения простыми словами\n\n"
+        f"⚠️ <b>Для доступа к функциям необходимо подтвердить подписку!</b>\n\n"
+        f"📧 <b>Введите email, который вы указывали при регистрации на сайте:</b>\n"
+        f"<i>Просто отправьте его в чат (например: user@example.com)</i>"
+    )
+
+    await message.answer(welcome_text, parse_mode="HTML")
+    await db.log_action(user_id, "start", "Waiting for email verification")
+
+
+@dp.message(QueryMode.waiting_for_email_verification)
+async def handle_email_verification(message: Message, state: FSMContext):
+    """Обработка ввода email для проверки подписки"""
+    user_id = message.from_user.id
+    email = message.text.strip()
+
+    if not subscription_manager.is_valid_email(email):
+        await message.answer(
+            "❌ <b>Неверный формат email</b>\n\n"
+            "Пожалуйста, введите корректный email в формате:\n"
+            "<code>user@example.com</code>\n\n"
+            "Или напишите /cancel для отмены",
+            parse_mode="HTML"
+        )
+        return
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    status = await subscription_manager.check_subscription(email)
+
+    if status.is_valid:
+        await subscription_manager.grant_access(user_id, email, status)
+        await state.clear()
+
+        trial_badge = " 🎁 (пробный период)" if status.is_trial else ""
+        success_text = (
+            f"✅ <b>Подписка подтверждена!</b>{trial_badge}\n\n"
+            f"📧 Email: <code>{email}</code>\n"
+            f"🔗 Статус: {'Активна' if status.is_active else 'Неактивна'}\n"
+            f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\n"
+            f"Используйте кнопки в меню для выбора категории."
+        )
+
+        await message.answer(
+            success_text,
+            reply_markup=create_main_keyboard(user_id),
+            parse_mode="HTML"
+        )
+        await db.log_action(user_id, "verification_success", email)
+
+    else:
+        await subscription_manager.deny_access(user_id, email, status.error or "Not active")
+        error_reason = status.error if status.error else "Подписка не найдена или не активна"
+
+        await message.answer(
+            f"❌ <b>Не удалось подтвердить подписку</b>\n\n"
+            f"📧 Email: <code>{email}</code>\n"
+            f"⚠️ Причина: {error_reason}\n\n"
+            f"💡 <b>Что делать:</b>\n"
+            f"• Проверьте правильность email\n"
+            f"• Убедитесь что вы оформили подписку на сайте\n"
+            f"• Попробуйте другой email\n\n"
+            f"📧 <b>Введите email ещё раз:</b>",
+            parse_mode="HTML"
+        )
+        await db.log_action(user_id, "verification_failed", f"{email} | {error_reason}")
+
+
+async def _send_main_menu(message: Message, user):
+    """Отправить главное меню верифицированному пользователю"""
     user_data = await db.get_user(user.id)
     email = user_data.get('email') if user_data else None
 
@@ -513,22 +585,17 @@ async def cmd_start(message: Message, state: FSMContext):
         f"🔍 Поиск и анализ информации\n"
         f"🎓 Помощь в учёбе и объяснения простыми словами\n"
         f"📰 Новости и тренды с аналитикой\n"
-        f"💬 Ответы на любые вопросы\n\n"
+        f"💬 Ответы на любые вопросы"
     )
-    if not email:
-        text += (
-            f"⚠️ <b>ВАЖНО: Для доступа к функциям необходимо привязать почту!</b>\n\n"
-            f"📧 <b>Введите email, который вы указывали при регистрации на сайте.</b>\n"
-            f"Просто отправьте его в чат (например: user@example.com)\n\n"
-            f"После привязки почты вам откроется полный функционал бота."
-        )
-        keyboard = None
-    else:
-        text += f"✅ <b>Ваша почта привязана:</b> <code>{email}</code>"
-        keyboard = create_main_keyboard(user.id)
 
-    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
-    await db.log_action(user.id, "start", "Bot started")
+    if email:
+        text += f"\n\n✅ <b>Ваша почта привязана:</b> <code>{email}</code>"
+
+    await message.answer(
+        text,
+        reply_markup=create_main_keyboard(user.id),
+        parse_mode="HTML"
+    )
 
 
 @dp.message(F.text == "❓ Помощь, Подписка")
@@ -540,7 +607,7 @@ async def handle_subscription_help(message: Message):
     await db.mark_subscription_clicked(user_id)
     await db.log_action(user_id, "subscription_click", SUBSCRIPTION_URL)
 
-    text = f"📋 <b>Помощь и подписка</b>\n\n🔧 <b>Технические вопросы и отмена подписки:</b>\nПишите: @samoylov1smm\n\n"
+    text = f"📋 <b>Помощь и подписка</b>\n\n🔧 <b>Технические вопросы и отмена подписки:</b>\nПишите: @robuxmanager\n\n"
     if not email:
         text += (
             f"⚠️ <b>Почта не привязана!</b>\n\n"
@@ -655,15 +722,46 @@ async def handle_games_category(message: Message):
     )
 
 
+# 🔐 БЛОКИРОВКА: перехватываем все сообщения от неверифицированных пользователей
+@dp.message(~CommandStart(), ~F.text.startswith('/'), StateFilter(None))
+async def block_unverified_user(message: Message, state: FSMContext):
+    """Блокирует взаимодействие с ботом до верификации подписки"""
+    user_id = message.from_user.id
+    is_verified = await subscription_manager.is_user_verified(user_id)
+
+    if not is_verified:
+        await message.answer(
+            "⚠️ <b>Сначала подтвердите подписку!</b>\n\n"
+            "📧 Введите email, который вы указывали при регистрации:\n"
+            "<i>Например: user@example.com</i>\n\n"
+            "Или напишите /start чтобы начать сначала",
+            parse_mode="HTML"
+        )
+        await db.log_action(user_id, "blocked_unverified", message.text[:50] if message.text else "no text")
+        return
+
+
 # ================= ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ (ПОСЛЕДНИМ!) =================
 
 @dp.message(~F.text.startswith('/'), StateFilter(None))
 async def handle_message(message: Message, state: FSMContext):
-    """Основной обработчик: email + ИИ"""
+    """Основной обработчик: ИИ"""
     if not message.text:
         return
-    text = message.text.strip()
+
+    # 🔐 Проверка верификации
     user_id = message.from_user.id
+    is_verified = await subscription_manager.is_user_verified(user_id)
+
+    if not is_verified and state.get_state() != QueryMode.waiting_for_email_verification:
+        await message.answer(
+            "⚠️ <b>Сначала подтвердите подписку!</b>\n\n"
+            "📧 Введите email или напишите /start",
+            parse_mode="HTML"
+        )
+        return
+
+    text = message.text.strip()
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 
     if re.match(email_pattern, text):
@@ -680,7 +778,7 @@ async def handle_message(message: Message, state: FSMContext):
             await db.log_action(user_id, "email_linked", text)
         except Exception as e:
             logging.error(f"Ошибка при привязке email: {e}")
-            await message.answer("❌ <b>Не удалось привязать почту</b>\n\nПопробуйте позже или обратитесь в поддержку: @samoylov1smm", parse_mode="HTML")
+            await message.answer("❌ <b>Не удалось привязать почту</b>\n\nПопробуйте позже или обратитесь в поддержку: @robuxmanager", parse_mode="HTML")
         return
 
     await db.increment_message_count(user_id)
@@ -820,8 +918,6 @@ async def admin_guide_add_description_received(message: Message, state: FSMConte
     await message.answer("3️⃣ Выберите <b>категорию</b>:\n\n• game — Игры (Dota 2, CS2, LoL)\n• learn — Обучение\n• tech — Технологии\n\nНапишите: game, learn или tech\n\nДля отмены: /cancel")
 
 
-# 🔧 ИСПРАВЛЕНО: Разделили хендлеры на два отдельных
-
 @dp.message(QueryMode.admin_guide_add_category)
 async def admin_guide_add_category_received(message: Message, state: FSMContext):
     """Получение категории гайда через сообщение"""
@@ -835,8 +931,6 @@ async def admin_guide_add_category_received(message: Message, state: FSMContext)
 
     await state.update_data(category=category)
     await state.set_state(QueryMode.admin_guide_select_media)
-
-    # Показываем выбор медиа (страница 1)
     await _show_media_selection(message, state, page=1)
 
 
@@ -847,31 +941,26 @@ async def admin_guide_media_page_callback(callback: CallbackQuery, state: FSMCon
         await callback.answer("🔐 /admin", show_alert=True)
         return
 
-    # Получаем номер страницы
     try:
         page = int(callback.data.split("_")[-1])
     except (IndexError, ValueError):
         page = 1
 
-    # Проверяем что категория выбрана
     data = await state.get_data()
     if not data.get('category'):
         await callback.answer("❌ Сначала выберите категорию", show_alert=True)
         return
 
-    # Показываем выбор медиа с нужной страницы
     await _show_media_selection(callback, state, page=page)
     await callback.answer()
 
 
 async def _show_media_selection(target, state: FSMContext, page: int):
     """Внутренняя функция: показывает выбор медиа (универсально для Message/CallbackQuery)"""
-    # Получаем медиа из библиотеки
     media = await guides_db.get_media_from_library(limit=200)
     total_media = len(media)
     total_pages = (total_media + MEDIA_PER_PAGE - 1) // MEDIA_PER_PAGE
 
-    # Корректируем страницу
     if page < 1:
         page = 1
     if page > total_pages and total_pages > 0:
@@ -881,7 +970,6 @@ async def _show_media_selection(target, state: FSMContext, page: int):
     end_idx = start_idx + MEDIA_PER_PAGE
     page_media = media[start_idx:end_idx]
 
-    # Формируем текст
     text = "4️⃣ <b>Выберите медиа для гайда</b>\n\n"
 
     if not page_media and total_media == 0:
@@ -891,7 +979,6 @@ async def _show_media_selection(target, state: FSMContext, page: int):
         text += "2. Выберите 📚 Медиа-библиотека\n"
         text += "3. Загрузите файлы\n\n"
         text += "Или напишите /skip чтобы продолжить без медиа"
-
         keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
             [types.InlineKeyboardButton(text="⏭️ Пропустить", callback_data="guide_media_skip")],
             [types.InlineKeyboardButton(text="🔙 Назад", callback_data="admin_guide_add")]
@@ -914,13 +1001,11 @@ async def _show_media_selection(target, state: FSMContext, page: int):
             [types.InlineKeyboardButton(text="⏭️ Пропустить", callback_data="guide_media_skip")]
         ])
 
-        # Добавляем пагинацию если страниц больше 1
         if total_pages > 1:
             pagination_kb = create_media_page_keyboard(page, total_pages, "guide_media_select")
             for btn_row in pagination_kb.inline_keyboard:
                 keyboard.inline_keyboard.append(btn_row)
 
-    # Отправляем ответ (универсально для Message или CallbackQuery)
     if isinstance(target, Message):
         await target.answer(text, reply_markup=keyboard, parse_mode="HTML")
     elif isinstance(target, CallbackQuery):
@@ -934,12 +1019,10 @@ async def admin_guide_select_media_from_library(message: Message, state: FSMCont
         return
     text = message.text.strip()
 
-    # Проверка на пропуск
     if text.lower() == '/skip':
         await _save_guide_with_selected_media(message, state, [])
         return
 
-    # Парсим номера файлов
     try:
         numbers = [int(n.strip()) for n in text.replace(',', ' ').split() if n.strip().isdigit()]
     except ValueError:
@@ -950,10 +1033,7 @@ async def admin_guide_select_media_from_library(message: Message, state: FSMCont
         await message.answer("❌ <b>Не выбрано ни одного файла</b>\n\nОтправьте номера файлов или напишите /skip", parse_mode="HTML")
         return
 
-    # Получаем ВСЕ медиа из библиотеки (не только текущую страницу!)
     all_media = await guides_db.get_media_from_library(limit=200)
-
-    # Выбираем файлы по глобальным номерам (1 = первый в библиотеке, не на странице)
     selected_media = []
     for num in numbers:
         if 1 <= num <= len(all_media):
@@ -963,11 +1043,9 @@ async def admin_guide_select_media_from_library(message: Message, state: FSMCont
         await message.answer("❌ <b>Файлы не найдены</b>\n\nПроверьте номера и попробуйте снова", parse_mode="HTML")
         return
 
-    # Сохраняем выбранные медиа в состоянии
     await state.update_data(selected_media=selected_media)
     await state.set_state(QueryMode.admin_guide_media_confirm)
 
-    # Показываем подтверждение
     confirm_text = "✅ <b>Выбрано файлов:</b>\n\n" + "\n".join(
         f"{i}. {'📷' if m['file_type'] == 'photo' else '🎬' if m['file_type'] in ['video', 'animation'] else '📎'} {m['file_name'] or 'Без имени'}"
         for i, m in enumerate(selected_media, 1)
@@ -1034,7 +1112,6 @@ async def admin_show_guides_list(callback: CallbackQuery):
         await callback.answer("🔐 /admin", show_alert=True)
         return
 
-    # Определяем номер страницы из callback_data
     page = 1
     if callback.data.startswith("guides_page_"):
         try:
@@ -1042,41 +1119,33 @@ async def admin_show_guides_list(callback: CallbackQuery):
         except (IndexError, ValueError):
             page = 1
 
-    # Получаем все гайды
     guides = await guides_db.get_guides()
     total_guides = len(guides)
     total_pages = (total_guides + GUIDES_PER_PAGE - 1) // GUIDES_PER_PAGE
 
-    # Корректируем страницу если вышла за границы
     if page < 1:
         page = 1
     if page > total_pages and total_pages > 0:
         page = total_pages
 
-    # Вырезаем гайды для текущей страницы
     start_idx = (page - 1) * GUIDES_PER_PAGE
     end_idx = start_idx + GUIDES_PER_PAGE
     page_guides = guides[start_idx:end_idx]
 
-    # Формируем текст
     if not page_guides and total_guides == 0:
         text = "📭 <b>Гайды не найдены</b>\n\n"
         text += "Добавьте первый гайд через кнопку «➕ Добавить гайд»"
     else:
         text = f"📋 <b>Список гайдов</b> ({page}/{total_pages})\n\n"
-
         for i, guide in enumerate(page_guides, start_idx + 1):
             media_count = len(await guides_db.get_guide_media(guide['id']))
             emoji = '📷' if guide['media_type'] == 'photo' else '🎬' if guide['media_type'] in ['video', 'animation'] else '📎' if guide['media_type'] else '📄'
-
             text += f"{i}. {emoji} <code>{guide['title']}</code>\n"
             text += f"   Категория: {guide['category']} | 👁️ {guide['views']} | 📎 {media_count} файл(ов)\n"
             text += f"   ID: <code>{guide['id']}</code>\n\n"
-
         if total_guides > GUIDES_PER_PAGE:
             text += f"📊 Всего: {total_guides} гайдов"
 
-    # Формируем inline-кнопки для гайдов на текущей странице
     inline_keyboard = []
     for guide in page_guides:
         inline_keyboard.append([
@@ -1084,11 +1153,9 @@ async def admin_show_guides_list(callback: CallbackQuery):
             types.InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"admin_guide_delete_confirm_{guide['id']}")
         ])
 
-    # Добавляем кнопки управления
     if total_guides > 0:
         inline_keyboard.append([types.InlineKeyboardButton(text="➕ Добавить новый", callback_data="admin_guide_add")])
 
-    # Добавляем пагинацию если страниц больше 1
     if total_pages > 1:
         pagination_kb = create_guides_page_keyboard(page, total_pages)
         for btn_row in pagination_kb.inline_keyboard:
@@ -1732,6 +1799,7 @@ async def main():
         await bot.session.close()
         await db.close()
         await guides_db.close()
+        await subscription_manager.close()
 
 
 if __name__ == "__main__":
