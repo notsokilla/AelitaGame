@@ -157,7 +157,7 @@ def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
     keyboard = [
         [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
         [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
-        [types.KeyboardButton(text="📚 Гайды"), types.KeyboardButton(text="📎 Материалы")],
+        [types.KeyboardButton(text="📎 Материалы")],
         [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
     ]
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
@@ -722,28 +722,12 @@ async def handle_games_category(message: Message):
     )
 
 
-# 🔐 БЛОКИРОВКА: перехватываем все сообщения от неверифицированных пользователей
-@dp.message(~CommandStart(), ~F.text.startswith('/'), StateFilter(None))
-async def block_unverified_user(message: Message, state: FSMContext):
-    """Блокирует взаимодействие с ботом до верификации подписки"""
-    user_id = message.from_user.id
-    is_verified = await subscription_manager.is_user_verified(user_id)
 
-    if not is_verified:
-        await message.answer(
-            "⚠️ <b>Сначала подтвердите подписку!</b>\n\n"
-            "📧 Введите email, который вы указывали при регистрации:\n"
-            "<i>Например: user@example.com</i>\n\n"
-            "Или напишите /start чтобы начать сначала",
-            parse_mode="HTML"
-        )
-        await db.log_action(user_id, "blocked_unverified", message.text[:50] if message.text else "no text")
-        return
 
 
 # ================= ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ (ПОСЛЕДНИМ!) =================
 
-@dp.message(~F.text.startswith('/'), StateFilter(None))
+@dp.message(~F.text.startswith('/'))
 async def handle_message(message: Message, state: FSMContext):
     """Основной обработчик: ИИ"""
     if not message.text:
@@ -751,9 +735,16 @@ async def handle_message(message: Message, state: FSMContext):
 
     # 🔐 Проверка верификации
     user_id = message.from_user.id
+    current_state = await state.get_state()
+
+    # Если в режиме верификации — пропускаем (это обрабатывается другим хендлером)
+    if current_state == QueryMode.waiting_for_email_verification:
+        return
+
+    # Проверяем верификацию
     is_verified = await subscription_manager.is_user_verified(user_id)
 
-    if not is_verified and state.get_state() != QueryMode.waiting_for_email_verification:
+    if not is_verified:
         await message.answer(
             "⚠️ <b>Сначала подтвердите подписку!</b>\n\n"
             "📧 Введите email или напишите /start",
@@ -764,38 +755,39 @@ async def handle_message(message: Message, state: FSMContext):
     text = message.text.strip()
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 
+    # Проверяем не email ли это (на случай если пользователь ввел после верификации)
     if re.match(email_pattern, text):
-        try:
-            await db.add_user_email(user_id, text)
-            await message.answer(
-                f"✅ <b>Почта привязана!</b>\n\n📧 Email: <code>{text}</code>\n\n"
-                f"🔗 <b>Ваш личный кабинет:</b>\nПерейдите по ссылке для управления подпиской:\n\n👉 {SUBSCRIPTION_URL}\n\n"
-                f"📋 <b>В личном кабинете вы можете:</b>\n"
-                f"• ✅ Проверить статус подписки\n• ❌ <b>Отменить подписку</b> в любой момент\n• 📊 Получить доступ ко всем материалам\n\n"
-                f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\nИспользуйте кнопки в меню для выбора категории.",
-                reply_markup=create_main_keyboard(user_id), parse_mode="HTML", disable_web_page_preview=False
-            )
-            await db.log_action(user_id, "email_linked", text)
-        except Exception as e:
-            logging.error(f"Ошибка при привязке email: {e}")
-            await message.answer("❌ <b>Не удалось привязать почту</b>\n\nПопробуйте позже или обратитесь в поддержку: @robuxmanager", parse_mode="HTML")
+        await message.answer(
+            "✅ <b>Почта уже привязана!</b>\n\n"
+            f"📧 Email: <code>{text}</code>\n\n"
+            "Используйте кнопки меню для работы с ботом.",
+            reply_markup=create_main_keyboard(user_id),
+            parse_mode="HTML"
+        )
         return
 
     await db.increment_message_count(user_id)
     await db.log_action(user_id, "message", text[:100])
     category = detect_category(text)
+
+    logging.info(f"🤖 Запрос к ИИ от {user_id}: категория={category}, текст={text[:50]}")
+
     await bot.send_chat_action(message.chat.id, "typing")
     ai_response = await call_neural_api(category, text)
     ai_response = truncate_message(ai_response)
     await db.increment_ai_requests(user_id)
+
     emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
     full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
+
     try:
         await message.answer(full_response, reply_markup=create_inline_categories(), parse_mode="HTML")
     except TelegramBadRequest as e:
         if "too long" in str(e):
             await message.answer(f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...", reply_markup=create_inline_categories(), parse_mode="HTML")
-
+        else:
+            logging.error(f"Ошибка отправки ответа: {e}")
+            await message.answer("⚠️ Произошла ошибка при отправке ответа. Попробуйте позже.")
 
 # ================= ПОЛЬЗОВАТЕЛЬ: ПРОСМОТР ГАЙДОВ =================
 
