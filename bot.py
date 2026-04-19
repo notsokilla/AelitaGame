@@ -722,73 +722,6 @@ async def handle_games_category(message: Message):
     )
 
 
-
-
-
-# ================= ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ (ПОСЛЕДНИМ!) =================
-
-@dp.message(~F.text.startswith('/'))
-async def handle_message(message: Message, state: FSMContext):
-    """Основной обработчик: ИИ"""
-    if not message.text:
-        return
-
-    # 🔐 Проверка верификации
-    user_id = message.from_user.id
-    current_state = await state.get_state()
-
-    # Если в режиме верификации — пропускаем (это обрабатывается другим хендлером)
-    if current_state == QueryMode.waiting_for_email_verification:
-        return
-
-    # Проверяем верификацию
-    is_verified = await subscription_manager.is_user_verified(user_id)
-
-    if not is_verified:
-        await message.answer(
-            "⚠️ <b>Сначала подтвердите подписку!</b>\n\n"
-            "📧 Введите email или напишите /start",
-            parse_mode="HTML"
-        )
-        return
-
-    text = message.text.strip()
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-
-    # Проверяем не email ли это (на случай если пользователь ввел после верификации)
-    if re.match(email_pattern, text):
-        await message.answer(
-            "✅ <b>Почта уже привязана!</b>\n\n"
-            f"📧 Email: <code>{text}</code>\n\n"
-            "Используйте кнопки меню для работы с ботом.",
-            reply_markup=create_main_keyboard(user_id),
-            parse_mode="HTML"
-        )
-        return
-
-    await db.increment_message_count(user_id)
-    await db.log_action(user_id, "message", text[:100])
-    category = detect_category(text)
-
-    logging.info(f"🤖 Запрос к ИИ от {user_id}: категория={category}, текст={text[:50]}")
-
-    await bot.send_chat_action(message.chat.id, "typing")
-    ai_response = await call_neural_api(category, text)
-    ai_response = truncate_message(ai_response)
-    await db.increment_ai_requests(user_id)
-
-    emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
-    full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
-
-    try:
-        await message.answer(full_response, reply_markup=create_inline_categories(), parse_mode="HTML")
-    except TelegramBadRequest as e:
-        if "too long" in str(e):
-            await message.answer(f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...", reply_markup=create_inline_categories(), parse_mode="HTML")
-        else:
-            logging.error(f"Ошибка отправки ответа: {e}")
-            await message.answer("⚠️ Произошла ошибка при отправке ответа. Попробуйте позже.")
-
 # ================= ПОЛЬЗОВАТЕЛЬ: ПРОСМОТР ГАЙДОВ =================
 
 @dp.callback_query(F.data.startswith("user_guide_view_"))
@@ -1748,6 +1681,73 @@ async def handle_category_callback(callback: CallbackQuery, state: FSMContext):
         await callback.message.answer(f"{cat_name} — напишите вопрос 👇")
     except:
         pass
+
+
+# ================= ОБЩИЙ ОБРАБОТЧИК СООБЩЕНИЙ (ПОСЛЕДНИМ!) =================
+
+@dp.message(~F.text.startswith('/'))
+async def handle_message(message: Message, state: FSMContext):
+    """Основной обработчик: ИИ"""
+    if not message.text:
+        return
+
+    # 🔐 Получаем текущее состояние
+    current_state = await state.get_state()
+
+    # ❌ ВАЖНО: Пропускаем ВСЕ служебные состояния
+    # Чтобы они обрабатывались своими хендлерами
+    if current_state is not None and current_state != "None":
+        logging.debug(f"⏭️ Пропускаем сообщение, состояние: {current_state}")
+        return
+
+    # 🔐 Проверка верификации для обычных пользователей
+    user_id = message.from_user.id
+    is_verified = await subscription_manager.is_user_verified(user_id)
+
+    if not is_verified:
+        await message.answer(
+            "⚠️ <b>Сначала подтвердите подписку!</b>\n\n"
+            "📧 Введите email или напишите /start",
+            parse_mode="HTML"
+        )
+        return
+
+    text = message.text.strip()
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+    # Проверяем не email ли это (на случай если пользователь ввел после верификации)
+    if re.match(email_pattern, text):
+        await message.answer(
+            "✅ <b>Почта уже привязана!</b>\n\n"
+            f"📧 Email: <code>{text}</code>\n\n"
+            "Используйте кнопки меню для работы с ботом.",
+            reply_markup=create_main_keyboard(user_id),
+            parse_mode="HTML"
+        )
+        return
+
+    await db.increment_message_count(user_id)
+    await db.log_action(user_id, "message", text[:100])
+    category = detect_category(text)
+
+    logging.info(f"🤖 Запрос к ИИ от {user_id}: категория={category}, текст={text[:50]}")
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    ai_response = await call_neural_api(category, text)
+    ai_response = truncate_message(ai_response)
+    await db.increment_ai_requests(user_id)
+
+    emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
+    full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
+
+    try:
+        await message.answer(full_response, reply_markup=create_inline_categories(), parse_mode="HTML")
+    except TelegramBadRequest as e:
+        if "too long" in str(e):
+            await message.answer(f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...", reply_markup=create_inline_categories(), parse_mode="HTML")
+        else:
+            logging.error(f"Ошибка отправки ответа: {e}")
+            await message.answer("⚠️ Произошла ошибка при отправке ответа. Попробуйте позже.")
 
 
 # ================= ОБРАБОТКА ОШИБОК =================

@@ -23,7 +23,7 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # ================= SUBSCRIPTION =================
-SUBSCRIPTION_URL = os.getenv("SUBSCRIPTION_URL_AC", "https://yoursite.com/subscribe")
+SUBSCRIPTION_URL = os.getenv("SUBSCRIPTION_URL_AC", "На данный момент не заполнено.")
 
 # ================= DATABASE =================
 DB_PATH = os.getenv("DB_PATH", "bot_database.db")
