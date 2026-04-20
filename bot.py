@@ -28,6 +28,47 @@ from database import Database
 from guides_db import GuidesDatabase
 from subscription_manager import SubscriptionManager, SubscriptionStatus
 
+async def ensure_admin_in_db(db, admin_email: str, admin_telegram_id: Optional[int] = None):
+    """
+    Создать или обновить запись админа в БД при запуске
+
+    :param db: Экземпляр Database
+    :param admin_email: Email админа
+    :param admin_telegram_id: Telegram ID админа (опционально, для привязки)
+    """
+    try:
+        # Проверяем существует ли пользователь с таким email
+        users = await db.search_users_by_email(admin_email)
+
+        if users:
+            # Админ уже есть — обновляем запись
+            user = users[0]
+            await db.add_or_update_user({
+                'id': user['user_id'],
+                'email': admin_email,
+                'subscription_clicked': True,  # Помечаем как активного
+            })
+            logging.info(f"✅ Админ {admin_email} уже в БД (ID: {user['user_id']})")
+        else:
+            # Создаём нового админа
+            # Если указан Telegram ID — используем его, иначе создаём "виртуального"
+            admin_id = admin_telegram_id or 999999999  # Заглушка если нет реального ID
+
+            await db.add_or_update_user({
+                'id': admin_id,
+                'email': admin_email,
+                'username': 'admin',
+                'first_name': 'Admin',
+                'last_name': 'OfferFlow',
+                'language_code': 'ru',
+                'is_bot': False,
+                'subscription_clicked': True,  # ✅ Админ имеет доступ
+            })
+            logging.info(f"✅ Создан админ {admin_email} в БД")
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка при создании админа {admin_email}: {e}")
+
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -531,6 +572,32 @@ async def handle_email_verification(message: Message, state: FSMContext):
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
+
+    # 🔐 ПРОВЕРКА: является ли email админским
+    if await subscription_manager.is_admin_email(email):
+        # Админ — предоставляем доступ сразу
+        await subscription_manager.grant_access(user_id, email, SubscriptionStatus(
+            is_active=True,
+            is_trial=False,
+            email=email,
+            subscription_id="admin",
+            error=None
+        ))
+        await state.clear()
+
+        await message.answer(
+            f"✅ <b>Доступ администратора предоставлен!</b>\n\n"
+            f"📧 Email: <code>{email}</code>\n"
+            f"🔑 Тип: Администратор\n\n"
+            f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\n"
+            f"Используйте кнопки в меню для выбора категории.",
+            reply_markup=create_main_keyboard(user_id),
+            parse_mode="HTML"
+        )
+        await db.log_action(user_id, "admin_access_granted", email)
+        return
+
+    # Обычный пользователь — проверяем подписку через API
     status = await subscription_manager.check_subscription(email)
 
     if status.is_valid:
@@ -1775,6 +1842,10 @@ async def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
     await db.connect()
     await guides_db.connect()
+
+    # 🔐 Создаём/проверяем админа при каждом запуске
+    await ensure_admin_in_db(db, "admin@offerflow.tech")
+
     session = AiohttpSession()
     global bot
     bot = Bot(token=BOT_TOKEN, session=session)
