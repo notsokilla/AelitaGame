@@ -21,7 +21,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
 from aiogram.client.session.aiohttp import AiohttpSession
 from openai import AsyncOpenAI
-
+from datetime import datetime, timezone
 # Наши модули
 from config import *
 from database import Database
@@ -111,12 +111,12 @@ def logout_admin(user_id: int):
 
 # ================= ПРОМПТЫ =================
 PROMPTS = {
-    "math": "Ты — эксперт-математик и преподаватель. Решай задачи с ПОШАГОВЫМ объяснением.\nПРАВИЛА:\n1. Всегда показывай ход решения шаг за шагом\n2. Объясняй каждую операцию простым языком\n3. Используй формулы: x², √, ∫, ∑\nКАТЕГОРИИ: Алгебра • Геометрия • Статистика",
-    "search": "Ты — аналитик. Находи и структурируй информацию.\nПРАВИЛА:\n1. Давай точные факты\n2. Структурируй ответ: заголовки, списки\n3. Указывай дату актуальности",
-    "consult": "Ты — универсальный консультант. Давай полезные ответы.\nПРАВИЛА:\n1. Адаптируй сложность под вопрос\n2. Давай практические рекомендации\n3. Предлагай альтернативы",
-    "learn": "Ты — педагог. Объясняй сложное просто.\nПРАВИЛА:\n1. Используй аналогии\n2. Разбивай на простые шаги\n3. Давай советы по запоминанию",
-    "game": "Ты — геймер-аналитик. Помогай с билдами и стратегиями.\nПРАВИЛА:\n1. Указывай актуальность (патч, мета)\n2. Давай конкретные цифры\n3. Предлагай альтернативы\nИГРЫ: Dota 2 • CS2 • LoL • Valorant",
-    "news": "Ты — новостной обозреватель. Анализируй тренды.\nПРАВИЛА:\n1. Указывай дату и источник\n2. Разделяй факты и мнения\n3. Выделяй ключевые тренды"
+    "math": "Ты — эксперт-математик и преподаватель. Решай задачи с ПОШАГОВЫМ объяснением.\nПРАВИЛА:\n1. Всегда показывай ход решения шаг за шагом\n2. Объясняй каждую операцию простым языком\n3. Используй формулы: x², √, ∫, ∑\nКАТЕГОРИИ: Алгебра • Геометрия • Статистика\n Форматируй ответ для Telegram: используй <b>жирный</b>, <i>курсив</i>, <code>код</code>",
+    "search": "Ты — аналитик. Находи и структурируй информацию.\nПРАВИЛА:\n1. Давай точные факты\n2. Структурируй ответ: заголовки, списки\n3. Указывай дату актуальности\n Форматируй ответ для Telegram: используй <b>жирный</b>, <i>курсив</i>, <code>код</code>",
+    "consult": "Ты — универсальный консультант. Давай полезные ответы.\nПРАВИЛА:\n1. Адаптируй сложность под вопрос\n2. Давай практические рекомендации\n3. Предлагай альтернативы\n Форматируй ответ для Telegram: используй <b>жирный</b>, <i>курсив</i>, <code>код</code>",
+    "learn": "Ты — педагог. Объясняй сложное просто.\nПРАВИЛА:\n1. Используй аналогии\n2. Разбивай на простые шаги\n3. Давай советы по запоминанию\n Форматируй ответ для Telegram: используй <b>жирный</b>, <i>курсив</i>, <code>код</code>",
+    "game": "Ты — геймер-аналитик. Помогай с билдами и стратегиями.\nПРАВИЛА:\n1. Указывай актуальность (патч, мета)\n2. Давай конкретные цифры\n3. Предлагай альтернативы\nИГРЫ: Dota 2, CS2, LoL, Valorant, PUBG Mobile, PUBG, Black Russia, Standoff 2\n Форматируй ответ для Telegram: используй <b>жирный</b>, <i>курсив</i>, <code>код</code>",
+    #"news": "Ты — новостной обозреватель. Анализируй тренды.\nПРАВИЛА:\n1. Указывай актуальную дату, новости должны быть не более чем за последний месяц, и источник\n2. Разделяй факты и мнения\n3. Выделяй ключевые тренды\n Форматируй ответ для Telegram: используй <b>жирный</b>, <i>курсив</i>, <code>код</code>"
 }
 
 
@@ -153,8 +153,8 @@ def detect_category(text: str) -> str:
         return 'game'
     if any(kw in text_lower for kw in ['объясни', 'конспект', 'экзамен', 'учеб', 'как понять']):
         return 'learn'
-    if any(kw in text_lower for kw in ['новости', 'тренд', 'обзор', 'событие']):
-        return 'news'
+    #if any(kw in text_lower for kw in ['новости', 'тренд', 'обзор', 'событие']):
+    #    return 'news'
     if any(kw in text_lower for kw in ['найди', 'информация', 'факты', 'анализ']):
         return 'search'
     return 'consult'
@@ -175,22 +175,75 @@ def truncate_message(text: str, limit: int = 4000) -> str:
 
 
 async def call_neural_api(prompt_type: str, user_query: str) -> str:
-    """Запрос к нейросети"""
+    """Запрос к нейросети с актуальной датой"""
     try:
+        # 🔥 Получаем текущую дату и время (Москва / UTC+3)
+        now = datetime.now(timezone.utc).astimezone(timezone.utc)
+        date_str = now.strftime("%d %B %Y, %H:%M UTC")
+        weekday = now.strftime("%A")
+
+        # 🔥 Формируем блок с датой
+        date_context = (
+            f"\n\n📅 <b>Текущая дата и время:</b> {date_str} ({weekday})\n"
+            f"<i>Используй эту информацию для ответов на вопросы о времени, датах и сроках.</i>"
+        )
+
+        # 🔥 Добавляем дату в системный промпт
+        base_prompt = PROMPTS.get(prompt_type, PROMPTS['consult'])
+        system_content = (
+            base_prompt +
+            date_context +
+            "\n\nВАЖНО: Отвечай кратко, не более 3000 символов."
+        )
+
         response = await client.chat.completions.create(
             model=NEURAL_MODEL,
             messages=[
-                {"role": "system", "content": PROMPTS.get(prompt_type, PROMPTS['consult']) + "\n\nВАЖНО: Отвечай кратко, не более 3000 символов."},
+                {"role": "system", "content": system_content},
                 {"role": "user", "content": user_query}
             ],
             temperature=0.7, max_tokens=800
         )
-        return response.choices[0].message.content
+        result = response.choices[0].message.content
+        return format_for_telegram(result) if 'format_for_telegram' in globals() else result
+
     except Exception as e:
         logging.error(f"API Error: {e}")
         return f"⚠️ Ошибка нейросети: {type(e).__name__}"
 
+def format_for_telegram(text: str) -> str:
+    """Конвертирует Markdown-форматирование в HTML для Telegram"""
+    if not text:
+        return text
 
+    # **жирный** → <b>жирный</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+
+    # *курсив* → <i>курсив</i> (но не внутри слов)
+    text = re.sub(r'(?<!\w)\*(.+?)\*(?!\w)', r'<i>\1</i>', text)
+
+    # `код` → <code>код</code>
+    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+
+    # [текст](url) → <a href="url">текст</a>
+    text = re.sub(r'\[(.+?)\]\((.+?)\)', r'<a href="\2">\1</a>', text)
+
+    return text
+
+async def send_thinking_message(chat_id: int, category: str) -> Message:
+    """Отправляет интерактивное сообщение «думаю...» с индикатором"""
+    emojis = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
+    emoji = emojis.get(category, '🤖')
+
+    # Текст + анимация (спиннер)
+    text = f"{emoji} <b>Думаю...</b>\n\n<i>Это может занять несколько секунд</i>"
+
+    # Inline-кнопка для отмены (опционально)
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="⏳ Загрузка...", callback_data="ignore")]
+    ])
+
+    return await bot.send_message(chat_id, text, reply_markup=keyboard, parse_mode="HTML")
 # ================= КЛАВИАТУРЫ =================
 
 def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
@@ -199,7 +252,8 @@ def create_main_keyboard(user_id: int) -> types.ReplyKeyboardMarkup:
         [types.KeyboardButton(text="🧮 Математика"), types.KeyboardButton(text="🔍 Поиск")],
         [types.KeyboardButton(text="🎓 Обучение"), types.KeyboardButton(text="🎮 Игры")],
         [types.KeyboardButton(text="📎 Материалы")],
-        [types.KeyboardButton(text="📰 Новости"), types.KeyboardButton(text="💬 Консультация")],
+        #[types.KeyboardButton(text="📰 Новости"),
+        [types.KeyboardButton(text="💬 Консультация")],
     ]
     keyboard.append([types.KeyboardButton(text="❓ Помощь, Подписка")])
     return types.ReplyKeyboardMarkup(keyboard=keyboard, resize_keyboard=True)
@@ -211,8 +265,8 @@ def create_inline_categories() -> types.InlineKeyboardMarkup:
         [types.InlineKeyboardButton(text="🧮 Математика", callback_data="cat_math"),
          types.InlineKeyboardButton(text="🎮 Игры", callback_data="cat_game")],
         [types.InlineKeyboardButton(text="🎓 Учеба", callback_data="cat_learn"),
-         types.InlineKeyboardButton(text="🔍 Поиск", callback_data="cat_search")],
-        [types.InlineKeyboardButton(text="📰 Новости", callback_data="cat_news")]
+         types.InlineKeyboardButton(text="🔍 Поиск", callback_data="cat_search")]
+        #[types.InlineKeyboardButton(text="📰 Новости", callback_data="cat_news")]
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -1758,16 +1812,11 @@ async def handle_message(message: Message, state: FSMContext):
     if not message.text:
         return
 
-    # 🔐 Получаем текущее состояние
     current_state = await state.get_state()
-
-    # ❌ ВАЖНО: Пропускаем ВСЕ служебные состояния
-    # Чтобы они обрабатывались своими хендлерами
     if current_state is not None and current_state != "None":
         logging.debug(f"⏭️ Пропускаем сообщение, состояние: {current_state}")
         return
 
-    # 🔐 Проверка верификации для обычных пользователей
     user_id = message.from_user.id
     is_verified = await subscription_manager.is_user_verified(user_id)
 
@@ -1782,7 +1831,6 @@ async def handle_message(message: Message, state: FSMContext):
     text = message.text.strip()
     email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 
-    # Проверяем не email ли это (на случай если пользователь ввел после верификации)
     if re.match(email_pattern, text):
         await message.answer(
             "✅ <b>Почта уже привязана!</b>\n\n"
@@ -1793,28 +1841,47 @@ async def handle_message(message: Message, state: FSMContext):
         )
         return
 
-    await db.increment_message_count(user_id)
-    await db.log_action(user_id, "message", text[:100])
-    category = detect_category(text)
-
-    logging.info(f"🤖 Запрос к ИИ от {user_id}: категория={category}, текст={text[:50]}")
-
-    await bot.send_chat_action(message.chat.id, "typing")
-    ai_response = await call_neural_api(category, text)
-    ai_response = truncate_message(ai_response)
-    await db.increment_ai_requests(user_id)
-
-    emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
-    full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
+    # 🔥 ОТПРАВЛЯЕМ «ЗАГЛУШКУ» ВМЕСТО send_chat_action
+    thinking_msg = await send_thinking_message(message.chat.id, detect_category(text))
 
     try:
-        await message.answer(full_response, reply_markup=create_inline_categories(), parse_mode="HTML")
+        await db.increment_message_count(user_id)
+        await db.log_action(user_id, "message", text[:100])
+        category = detect_category(text)
+
+        logging.info(f"🤖 Запрос к ИИ от {user_id}: категория={category}, текст={text[:50]}")
+
+        # 🔥 Запрос к нейросети
+        ai_response = await call_neural_api(category, text)
+        ai_response = truncate_message(ai_response)
+        await db.increment_ai_requests(user_id)
+
+        emoji = {'math':'🧮','search':'🔍','consult':'💬','learn':'🎓','game':'🎮','news':'📰'}
+        full_response = f"{emoji.get(category,'🤖')} <b>Ответ:</b>\n\n{ai_response}"
+
+        # 🔥 РЕДАКТИРУЕМ сообщение вместо отправки нового
+        await thinking_msg.edit_text(
+            full_response,
+            reply_markup=create_inline_categories(),
+            parse_mode="HTML"
+        )
+
     except TelegramBadRequest as e:
-        if "too long" in str(e):
-            await message.answer(f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...", reply_markup=create_inline_categories(), parse_mode="HTML")
+        if "message is not modified" in str(e):
+            # Сообщение уже отредактировано — ничего не делаем
+            pass
+        elif "too long" in str(e):
+            await thinking_msg.edit_text(
+                f"{emoji.get(category,'🤖')} Ответ сокращён:\n\n{ai_response[:3500]}...",
+                reply_markup=create_inline_categories(),
+                parse_mode="HTML"
+            )
         else:
-            logging.error(f"Ошибка отправки ответа: {e}")
-            await message.answer("⚠️ Произошла ошибка при отправке ответа. Попробуйте позже.")
+            logging.error(f"Ошибка редактирования: {e}")
+            await thinking_msg.edit_text("⚠️ Произошла ошибка. Попробуйте позже.", reply_markup=None)
+    except Exception as e:
+        logging.error(f"Ошибка в handle_message: {e}")
+        await thinking_msg.edit_text("⚠️ Произошла ошибка при обработке запроса.", reply_markup=None)
 
 
 # ================= ОБРАБОТКА ОШИБОК =================
