@@ -579,87 +579,43 @@ async def cmd_start(message: Message, state: FSMContext):
     user = message.from_user
     user_id = user.id
 
-    # 🔥 ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ (можно убрать в продакшене)
-    logging.info("=== 📦 RAW UPDATE DEBUG ===")
-    logging.info(f"Full message dict: {message.model_dump()}")
-    logging.info(f"message.text: '{message.text}'")
-    logging.info("==========================")
-
-    # 🔥 ПАРСИНГ ТОКЕНА из message.text (надёжный способ)
+    # 🔥 ПАРСИНГ ТОКЕНА из message.text
     token = None
     if message.text:
         parts = message.text.split(maxsplit=1)
         if len(parts) > 1 and parts[0].lower() == '/start':
             token = parts[1].strip()
-            logging.info(f"✅ Token parsed: {token}")
 
-    logging.info(f"🚀 /start: user={user_id}, token='{token}'")
-
-    # 🔥 ЕСЛИ ЕСТЬ ТОКЕН — ОБРАБАТЫВАЕМ ПРИВЯЗКУ
+    # 🔥 ЛОГИРУЕМ ВХОД
     if token:
-        logging.info(f"🔗 Linking Telegram: user={user_id}, token={token[:20]}...")
+        logging.info(f"🚀 /start with token: user={user_id}, username={user.username}, token='{token}'")
+    else:
+        logging.info(f"🚀 /start without token: user={user_id}, username={user.username}")
 
-        thinking = await message.answer(
-            "🔗 <b>Привязываем аккаунт...</b>\n\n<i>Это займёт несколько секунд</i>",
-            parse_mode="HTML"
-        )
+    # 🔥 ЕСЛИ ЕСТЬ ТОКЕН — ПРОВЕРЯЕМ И ЛОГИРУЕМ (но не блокируем)
+    if token:
+        logging.info(f"🔗 Checking token: user={user_id}, token={token[:20]}...")
 
+        # Запрос к API
         result = await subscription_manager.link_telegram_to_subscription(
             token=token,
             telegram_user_id=user_id,
             telegram_username=user.username
         )
 
-        logging.info(f" Link result: {result}")
-
+        # 🔥 ПОДРОБНОЕ ЛОГИРОВАНИЕ РЕЗУЛЬТАТА
         if result.get("success"):
-            # ✅ УСПЕХ: отправляем НОВОЕ сообщение (не edit_text!) с ReplyKeyboardMarkup
-            await message.answer(
-                "✅ <b>Аккаунт успешно привязан!</b>\n\n"
-                "🎉 Теперь вам доступен полный функционал бота.\n"
-                "Используйте кнопки в меню для выбора категории.",
-                reply_markup=create_main_keyboard(user_id),
-                parse_mode="HTML"
-            )
-            # Удаляем сообщение "Думаю..." чтобы не было дублей
-            try:
-                await thinking.delete()
-            except:
-                pass
-
-            await db.add_or_update_user({
-                'id': user_id, 'username': user.username,
-                'first_name': user.first_name, 'last_name': user.last_name,
-                'language_code': user.language_code, 'is_bot': user.is_bot
-            })
-            await db.log_action(user_id, "telegram_linked", f"token={token[:10]}...")
-            return  # ← Важно: выходим, чтобы не шёл обычный поток
+            logging.info(f"✅ Token VALID: user={user_id}, token={token}, linked={result.get('linked')}, skipped={result.get('skipped')}")
+            await db.log_action(user_id, "telegram_linked", f"token={token}")
         else:
-            # ❌ ОШИБКА: тоже отправляем новое сообщение
-            error_msg = result.get("message", "Произошла ошибка")
-            await message.answer(
-                f"❌ <b>Не удалось привязать аккаунт</b>\n\n"
-                f"⚠️ {error_msg}\n\n"
-                f"💡 <b>Что делать:</b>\n"
-                f"• Убедитесь, что ссылка актуальна и не истекла\n"
-                f"• Попробуйте получить новую ссылку в личном кабинете\n"
-                f"• Или напишите в поддержку: @robuxmanager\n\n"
-                f"📧 <b>Или привяжите почту вручную:</b>\n"
-                f"<i>Просто отправьте в чат email, который вы указывали при регистрации</i>",
-                parse_mode="HTML"
-            )
-            try:
-                await thinking.delete()
-            except:
-                pass
-            await db.log_action(user_id, "telegram_link_failed", f"{token[:10]}... | {error_msg}")
-            # Не возвращаем — продолжаем обычный поток (предложим ввести email)
+            error_code = result.get('error', 'unknown')
+            error_msg = result.get('message', 'No message')
+            logging.warning(f"❌ Token INVALID: user={user_id}, token={token}, error={error_code}, message={error_msg}")
+            await db.log_action(user_id, "telegram_link_failed", f"token={token} | error={error_code} | {error_msg}")
 
-    # ================= ОБЫЧНЫЙ ПОТОК (БЕЗ ТОКЕНА ИЛИ ПОСЛЕ ОШИБКИ) =================
+    # ================= ОДИН ОБЩИЙ ПОТОК ДЛЯ ВСЕХ =================
 
-    logging.info(f"📝 Обычный запуск, регистрируем пользователя")
-
-    # Регистрируем пользователя
+    # Регистрируем пользователя (ОДИН РАЗ)
     await db.add_or_update_user({
         'id': user_id, 'username': user.username,
         'first_name': user.first_name, 'last_name': user.last_name,
@@ -675,7 +631,7 @@ async def cmd_start(message: Message, state: FSMContext):
         await db.log_action(user_id, "start", "Verified user")
         return
 
-    # Запрашиваем email
+    # Запрашиваем email (ОДИН РАЗ)
     logging.info(f"⏳ Пользователь {user_id} не верифицирован, запрашиваем email")
     await state.set_state(QueryMode.waiting_for_email_verification)
 
@@ -697,10 +653,11 @@ async def cmd_start(message: Message, state: FSMContext):
 
 @dp.message(QueryMode.waiting_for_email_verification)
 async def handle_email_verification(message: Message, state: FSMContext):
-    """Обработка ввода email для проверки подписки"""
+    """Обработка ввода email с проверкой на совпадение с токеном"""
     user_id = message.from_user.id
     email = message.text.strip()
 
+    # Валидация формата email
     if not subscription_manager.is_valid_email(email):
         await message.answer(
             "❌ <b>Неверный формат email</b>\n\n"
@@ -715,29 +672,56 @@ async def handle_email_verification(message: Message, state: FSMContext):
 
     # 🔐 ПРОВЕРКА: является ли email админским
     if await subscription_manager.is_admin_email(email):
-        # Админ — предоставляем доступ сразу
         await subscription_manager.grant_access(user_id, email, SubscriptionStatus(
-            is_active=True,
-            is_trial=False,
-            email=email,
-            subscription_id="admin",
-            error=None
+            is_active=True, is_trial=False, email=email, subscription_id="admin", error=None
         ))
         await state.clear()
-
         await message.answer(
             f"✅ <b>Доступ администратора предоставлен!</b>\n\n"
-            f"📧 Email: <code>{email}</code>\n"
-            f"🔑 Тип: Администратор\n\n"
-            f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\n"
-            f"Используйте кнопки в меню для выбора категории.",
+            f"📧 Email: <code>{email}</code>\n🔑 Тип: Администратор",
             reply_markup=create_main_keyboard(user_id),
             parse_mode="HTML"
         )
         await db.log_action(user_id, "admin_access_granted", email)
         return
 
-    # Обычный пользователь — проверяем подписку через API
+    # 🔐 ПРОВЕРКА: есть ли активная привязка по токену для этого пользователя
+    # Получаем пользователя из БД и проверяем, был ли успешный линк
+    user_data = await db.get_user(user_id)
+    telegram_linked = user_data.get('subscription_clicked') if user_data else False
+
+    if telegram_linked:
+        # ✅ Пользователь пришёл по токену — проверяем, совпадает ли email
+        status = await subscription_manager.check_subscription(email)
+
+        if status.is_valid:
+            # ✅ Email совпадает с активной подпиской
+            await subscription_manager.grant_access(user_id, email, status)
+            await state.clear()
+
+            trial_badge = " 🎁 (пробный период)" if status.is_trial else ""
+            await message.answer(
+                f"✅ <b>Подписка подтверждена!</b>{trial_badge}\n\n"
+                f"📧 Email: <code>{email}</code>\n"
+                f"🎉 <b>Теперь вам доступен полный функционал бота!</b>",
+                reply_markup=create_main_keyboard(user_id),
+                parse_mode="HTML"
+            )
+            await db.log_action(user_id, "verification_success", email)
+            return
+        else:
+            # ❌ Email не совпадает с подпиской
+            await message.answer(
+                f"❌ <b>Email не совпадает с подпиской</b>\n\n"
+                f"📧 Введён: <code>{email}</code>\n"
+                f"⚠️ Убедитесь, что это тот же email, на который оформлена подписка.\n\n"
+                f"📧 <b>Попробуйте другой email:</b>",
+                parse_mode="HTML"
+            )
+            await db.log_action(user_id, "verification_failed", f"{email} | token_mismatch")
+            return  # Остаёмся в состоянии ожидания
+
+    # 🔐 Обычная проверка подписки (если не было токена)
     status = await subscription_manager.check_subscription(email)
 
     if status.is_valid:
@@ -745,21 +729,14 @@ async def handle_email_verification(message: Message, state: FSMContext):
         await state.clear()
 
         trial_badge = " 🎁 (пробный период)" if status.is_trial else ""
-        success_text = (
+        await message.answer(
             f"✅ <b>Подписка подтверждена!</b>{trial_badge}\n\n"
             f"📧 Email: <code>{email}</code>\n"
-            f"🔗 Статус: {'Активна' if status.is_active else 'Неактивна'}\n"
-            f"🎉 <b>Теперь вам доступен полный функционал бота!</b>\n"
-            f"Используйте кнопки в меню для выбора категории."
-        )
-
-        await message.answer(
-            success_text,
+            f"🎉 <b>Теперь вам доступен полный функционал бота!</b>",
             reply_markup=create_main_keyboard(user_id),
             parse_mode="HTML"
         )
         await db.log_action(user_id, "verification_success", email)
-
     else:
         await subscription_manager.deny_access(user_id, email, status.error or "Not active")
         error_reason = status.error if status.error else "Подписка не найдена или не активна"

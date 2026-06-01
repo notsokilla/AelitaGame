@@ -91,7 +91,7 @@ class SubscriptionManager:
             "telegramUsername": telegram_username
         }
 
-        logging.info(f"🔗 Linking Telegram: user={telegram_user_id}, token={token[:10]}...")
+        logging.info(f"🔗 Linking Telegram: user={telegram_user_id}, token={token}")
 
         try:
             session = await self._get_session()
@@ -120,10 +120,10 @@ class SubscriptionManager:
                         "message": "Привязка успешна"
                     }
                 elif status == 404:
-                    logging.warning(f"❌ Подписка не найдена: token={token[:10]}...")
+                    logging.warning(f"❌ Подписка не найдена: token={token}")
                     return {"success": False, "error": "not_found", "message": "Подписка не найдена"}
                 elif status == 400:
-                    logging.warning(f"❌ Неверный токен: token={token[:10]}...")
+                    logging.warning(f"❌ Неверный токен: token={token}")
                     return {"success": False, "error": "invalid_token", "message": "Неверный или неоднозначный токен"}
                 else:
                     logging.error(f"❌ Ошибка сервера {status}: {data}")
