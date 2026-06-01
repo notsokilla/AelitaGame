@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 """
 🔐 Менеджер проверки подписки пользователя
-Отдельный модуль для валидации доступа к боту
 """
 
 import logging
@@ -31,9 +30,7 @@ class SubscriptionStatus:
 
 
 class SubscriptionManager:
-    """
-    Менеджер проверки подписки через внешний API
-    """
+    """Менеджер проверки подписки через внешний API"""
 
     EMAIL_PATTERN = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
 
@@ -83,6 +80,58 @@ class SubscriptionManager:
         is_valid = status.is_valid
         logging.debug(f"🔍 is_user_verified: user={user_id}, email={email}, is_valid={is_valid}")
         return is_valid
+
+    async def link_telegram_to_subscription(self, token: str, telegram_user_id: int, telegram_username: Optional[str]) -> Dict[str, Any]:
+        """Привязывает Telegram аккаунт к подписке через токен"""
+        url = "https://billing.offerflow.tech/api/subscriptions/telegram/link"
+
+        payload = {
+            "token": token,
+            "telegramUserId": telegram_user_id,
+            "telegramUsername": telegram_username
+        }
+
+        logging.info(f"🔗 Linking Telegram: user={telegram_user_id}, token={token[:10]}...")
+
+        try:
+            session = await self._get_session()
+            async with session.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=15
+            ) as response:
+                status = response.status
+                data = await response.json()
+
+                if status == 200:
+                    linked = data.get("linked", False)
+                    skipped = data.get("skipped", False)
+
+                    if linked and not skipped:
+                        logging.info(f"✅ Telegram привязан: user={telegram_user_id}")
+                    elif skipped:
+                        logging.info(f"⏭️ Уже привязано: user={telegram_user_id}")
+
+                    return {
+                        "success": True,
+                        "linked": linked,
+                        "skipped": skipped,
+                        "message": "Привязка успешна"
+                    }
+                elif status == 404:
+                    logging.warning(f"❌ Подписка не найдена: token={token[:10]}...")
+                    return {"success": False, "error": "not_found", "message": "Подписка не найдена"}
+                elif status == 400:
+                    logging.warning(f"❌ Неверный токен: token={token[:10]}...")
+                    return {"success": False, "error": "invalid_token", "message": "Неверный или неоднозначный токен"}
+                else:
+                    logging.error(f"❌ Ошибка сервера {status}: {data}")
+                    return {"success": False, "error": "server_error", "message": f"Ошибка сервера: {status}"}
+
+        except Exception as e:
+            logging.error(f"❌ Ошибка при привязке Telegram: {e}")
+            return {"success": False, "error": "connection_error", "message": "Не удалось соединиться с сервером"}
 
     async def check_subscription(self, email: str) -> SubscriptionStatus:
         email = email.strip().lower()

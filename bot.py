@@ -571,26 +571,112 @@ async def cmd_material(message: Message):
 
 
 # ================= ОБРАБОТЧИКИ: ПОЛЬЗОВАТЕЛЬ =================
-
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
-    """/start — начало взаимодействия с ботом"""
+    """
+    /start — обработка запуска бота с deep link токеном
+    """
     user = message.from_user
     user_id = user.id
 
+    # 🔥 ЛОГИРОВАНИЕ ДЛЯ ОТЛАДКИ (можно убрать в продакшене)
+    logging.info("=== 📦 RAW UPDATE DEBUG ===")
+    logging.info(f"Full message dict: {message.model_dump()}")
+    logging.info(f"message.text: '{message.text}'")
+    logging.info("==========================")
+
+    # 🔥 ПАРСИНГ ТОКЕНА из message.text (надёжный способ)
+    token = None
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1 and parts[0].lower() == '/start':
+            token = parts[1].strip()
+            logging.info(f"✅ Token parsed: {token}")
+
+    logging.info(f"🚀 /start: user={user_id}, token='{token}'")
+
+    # 🔥 ЕСЛИ ЕСТЬ ТОКЕН — ОБРАБАТЫВАЕМ ПРИВЯЗКУ
+    if token:
+        logging.info(f"🔗 Linking Telegram: user={user_id}, token={token[:20]}...")
+
+        thinking = await message.answer(
+            "🔗 <b>Привязываем аккаунт...</b>\n\n<i>Это займёт несколько секунд</i>",
+            parse_mode="HTML"
+        )
+
+        result = await subscription_manager.link_telegram_to_subscription(
+            token=token,
+            telegram_user_id=user_id,
+            telegram_username=user.username
+        )
+
+        logging.info(f" Link result: {result}")
+
+        if result.get("success"):
+            # ✅ УСПЕХ: отправляем НОВОЕ сообщение (не edit_text!) с ReplyKeyboardMarkup
+            await message.answer(
+                "✅ <b>Аккаунт успешно привязан!</b>\n\n"
+                "🎉 Теперь вам доступен полный функционал бота.\n"
+                "Используйте кнопки в меню для выбора категории.",
+                reply_markup=create_main_keyboard(user_id),
+                parse_mode="HTML"
+            )
+            # Удаляем сообщение "Думаю..." чтобы не было дублей
+            try:
+                await thinking.delete()
+            except:
+                pass
+
+            await db.add_or_update_user({
+                'id': user_id, 'username': user.username,
+                'first_name': user.first_name, 'last_name': user.last_name,
+                'language_code': user.language_code, 'is_bot': user.is_bot
+            })
+            await db.log_action(user_id, "telegram_linked", f"token={token[:10]}...")
+            return  # ← Важно: выходим, чтобы не шёл обычный поток
+        else:
+            # ❌ ОШИБКА: тоже отправляем новое сообщение
+            error_msg = result.get("message", "Произошла ошибка")
+            await message.answer(
+                f"❌ <b>Не удалось привязать аккаунт</b>\n\n"
+                f"⚠️ {error_msg}\n\n"
+                f"💡 <b>Что делать:</b>\n"
+                f"• Убедитесь, что ссылка актуальна и не истекла\n"
+                f"• Попробуйте получить новую ссылку в личном кабинете\n"
+                f"• Или напишите в поддержку: @robuxmanager\n\n"
+                f"📧 <b>Или привяжите почту вручную:</b>\n"
+                f"<i>Просто отправьте в чат email, который вы указывали при регистрации</i>",
+                parse_mode="HTML"
+            )
+            try:
+                await thinking.delete()
+            except:
+                pass
+            await db.log_action(user_id, "telegram_link_failed", f"{token[:10]}... | {error_msg}")
+            # Не возвращаем — продолжаем обычный поток (предложим ввести email)
+
+    # ================= ОБЫЧНЫЙ ПОТОК (БЕЗ ТОКЕНА ИЛИ ПОСЛЕ ОШИБКИ) =================
+
+    logging.info(f"📝 Обычный запуск, регистрируем пользователя")
+
+    # Регистрируем пользователя
     await db.add_or_update_user({
-        'id': user.id, 'username': user.username,
+        'id': user_id, 'username': user.username,
         'first_name': user.first_name, 'last_name': user.last_name,
         'language_code': user.language_code, 'is_bot': user.is_bot
     })
 
+    # Проверяем верификацию
     is_verified = await subscription_manager.is_user_verified(user_id)
 
     if is_verified:
+        logging.info(f"✅ Пользователь {user_id} уже верифицирован")
         await _send_main_menu(message, user)
         await db.log_action(user_id, "start", "Verified user")
         return
 
+    # Запрашиваем email
+    logging.info(f"⏳ Пользователь {user_id} не верифицирован, запрашиваем email")
     await state.set_state(QueryMode.waiting_for_email_verification)
 
     welcome_text = (
@@ -1886,8 +1972,8 @@ async def handle_message(message: Message, state: FSMContext):
 
 # ================= ОБРАБОТКА ОШИБОК =================
 
-@dp.errors()
-async def errors_handler(update: ErrorEvent, exception: Exception) -> bool:
+@dp.error()
+async def errors_handler(event: ErrorEvent, exception: Exception) -> bool:
     """Обработчик ошибок для aiogram 3.x"""
     if isinstance(exception, TelegramBadRequest) and "query is too old" in str(exception):
         return True
