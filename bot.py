@@ -19,6 +19,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
+from aiohttp import BasicAuth
 from aiogram.client.session.aiohttp import AiohttpSession
 from openai import AsyncOpenAI
 from datetime import datetime, timezone
@@ -1967,6 +1968,17 @@ async def errors_handler(event: ErrorEvent, exception: Exception) -> bool:
 
 # ================= ЗАПУСК =================
 
+def create_telegram_session() -> AiohttpSession:
+    if not PROXY_URL:
+        return AiohttpSession()
+    if not PROXY_USER:
+        logging.warning("PROXY_URL задан, но PROXY_USER пуст — прокси не используется")
+        return AiohttpSession()
+    auth = BasicAuth(login=PROXY_USER, password=PROXY_PASSWORD)
+    logging.info(f"🌐 Telegram через SOCKS5-прокси: {PROXY_URL}")
+    return AiohttpSession(proxy=(PROXY_URL, auth))
+
+
 async def main():
     """Точка входа"""
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', force=True)
@@ -1976,9 +1988,10 @@ async def main():
     # 🔐 Создаём/проверяем админа при каждом запуске
     await ensure_admin_in_db(db, "admin@offerflow.tech")
 
-    session = AiohttpSession()
+    session = create_telegram_session()
     global bot
     bot = Bot(token=BOT_TOKEN, session=session)
+    subscription_manager.bot = bot
     try:
         me = await bot.get_me()
         logging.info(f"🚀 Запуск @{me.username}")

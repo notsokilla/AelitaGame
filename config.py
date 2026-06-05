@@ -29,8 +29,10 @@ SUBSCRIPTION_URL = os.getenv("SUBSCRIPTION_URL_AC", "На данный моме�
 DB_PATH = os.getenv("DB_PATH", "bot_database.db")
 GUIDES_DB_PATH = os.getenv("GUIDES_DB_PATH", "guides_database.db")
 
-# ================= PROXY =================
+# ================= PROXY (Telegram) =================
 PROXY_URL = os.getenv("PROXY_URL", "")
+PROXY_USER = os.getenv("PROXY_USER", "")
+PROXY_PASSWORD = os.getenv("PROXY_PASSWORD", "")
 
 # ================= BOT INFO =================
 BOT_NAME = "NeuralBot"
