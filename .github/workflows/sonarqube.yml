@@ -18,9 +18,10 @@ jobs:
       - name: SonarQube Scan
         uses: sonarsource/sonarqube-scan-action@v6
         with:
-          projectKey: AelitaGame
-          projectName: AelitaGame 
-          projectBaseDir: .
+          args: >
+            -Dsonar.projectKey=AelitaGame
+            -Dsonar.projectName=AelitaGame
+            -Dsonar.sources=.
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: http://localhost:9000
