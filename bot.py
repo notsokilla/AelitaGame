@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import time
+import httpx
 from datetime import datetime
 from typing import Optional
 
@@ -19,7 +20,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import ErrorEvent
-from aiohttp import BasicAuth
 from aiogram.client.session.aiohttp import AiohttpSession
 from openai import AsyncOpenAI
 from datetime import datetime, timezone
@@ -75,8 +75,36 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 db = Database(DB_PATH)
 guides_db = GuidesDatabase(GUIDES_DB_PATH)
-client = AsyncOpenAI(api_key=NEURAL_API_KEY, base_url=NEURAL_BASE_URL)
 subscription_manager = SubscriptionManager(db, bot)
+neural_http_client: Optional[httpx.AsyncClient] = None
+
+
+def create_neural_client() -> AsyncOpenAI:
+    """
+    Создает клиент OpenRouter/OpenAI.
+    Если задан SOCKS5 прокси в .env, оборачивает API-запросы в этот прокси.
+    """
+    global neural_http_client
+
+    if not PROXY_URL:
+        logging.info("🌐 OpenRouter без прокси")
+        return AsyncOpenAI(api_key=NEURAL_API_KEY, base_url=NEURAL_BASE_URL)
+
+    proxy_url = PROXY_URL
+    if PROXY_USER and PROXY_PASSWORD and "@" not in PROXY_URL:
+        scheme, rest = PROXY_URL.split("://", 1)
+        proxy_url = f"{scheme}://{PROXY_USER}:{PROXY_PASSWORD}@{rest}"
+
+    logging.info(f"🌐 OpenRouter через прокси: {PROXY_URL}")
+    neural_http_client = httpx.AsyncClient(proxy=proxy_url, timeout=60.0)
+    return AsyncOpenAI(
+        api_key=NEURAL_API_KEY,
+        base_url=NEURAL_BASE_URL,
+        http_client=neural_http_client
+    )
+
+
+client = create_neural_client()
 
 # ================= АДМИН СЕССИИ =================
 admin_sessions: dict[int, float] = {}
@@ -1974,9 +2002,14 @@ def create_telegram_session() -> AiohttpSession:
     if not PROXY_USER:
         logging.warning("PROXY_URL задан, но PROXY_USER пуст — прокси не используется")
         return AiohttpSession()
-    auth = BasicAuth(login=PROXY_USER, password=PROXY_PASSWORD)
+
+    proxy_url = PROXY_URL
+    if PROXY_PASSWORD and "@" not in PROXY_URL:
+        scheme, rest = PROXY_URL.split("://", 1)
+        proxy_url = f"{scheme}://{PROXY_USER}:{PROXY_PASSWORD}@{rest}"
+
     logging.info(f"🌐 Telegram через SOCKS5-прокси: {PROXY_URL}")
-    return AiohttpSession(proxy=(PROXY_URL, auth))
+    return AiohttpSession(proxy=proxy_url)
 
 
 async def main():
@@ -2006,6 +2039,8 @@ async def main():
         await db.close()
         await guides_db.close()
         await subscription_manager.close()
+        if neural_http_client is not None:
+            await neural_http_client.aclose()
 
 
 if __name__ == "__main__":
