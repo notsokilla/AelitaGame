@@ -9,14 +9,16 @@ on:
 jobs:
   build:
     name: Build and analyze
-    runs-on: self-hosted  # ← Используем твой self-hosted runner
+    runs-on: self-hosted
     
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Shallow clones should be disabled for a better relevancy of analysis
+          fetch-depth: 0
       
-      - uses: sonarsource/sonarqube-scan-action@master
+      - uses: sonarsource/sonarqube-scan-action@v6
+        with:
+          projectBaseDir: .
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: http://localhost:9000  # ← SonarQube на виртуалке
+          SONAR_HOST_URL: http://localhost:9000
