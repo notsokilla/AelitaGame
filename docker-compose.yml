@@ -1,9 +1,10 @@
 services:
   bot:
+    image: ai-bot:latest
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: ai-game-bot
+    container_name: aelita-bot
     restart: unless-stopped
 
     env_file:
